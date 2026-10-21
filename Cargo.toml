@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Learning NES emulator — macOS .app/DMG, portable Linux/Windows"
 license = "MIT"
+build = "build.rs"
 
 [[bin]]
 name = "rs-nes"
@@ -14,6 +15,9 @@ glfw = "0.59"
 gl = "0.14"
 cpal = "0.15"
 rfd = "0.15"
+
+[build-dependencies]
+embed-resource = "3.0"
 
 # macOS: force Regular activation so keyboard goes to the game window
 # (rfd's file dialog can leave the process as Prohibited / Accessory).

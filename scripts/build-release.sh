@@ -43,6 +43,7 @@ pack_macos_app_dmg() {
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   cp "$bin" "$app/Contents/MacOS/rs-nes"
   chmod +x "$app/Contents/MacOS/rs-nes"
+  cp "$ROOT/assets/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
   sed "s/0\\.1\\.0/${VERSION}/g" "$ROOT/scripts/Info.plist" > "$app/Contents/Info.plist"
 
   # Ad-hoc sign so Gatekeeper is less noisy for local installs.

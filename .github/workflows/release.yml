@@ -52,6 +52,7 @@ jobs:
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/release/rs-nes "$APP/Contents/MacOS/rs-nes"
           chmod +x "$APP/Contents/MacOS/rs-nes"
+          cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
           sed "s/0\\.1\\.0/${VERSION}/g" scripts/Info.plist > "$APP/Contents/Info.plist"
           codesign --force --deep --sign - "$APP" || true
           STAGING="$(mktemp -d)"
