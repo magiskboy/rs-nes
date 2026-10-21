@@ -1,0 +1,107 @@
+# Build distributables: macOS .app + .dmg, Linux/Windows portable binaries.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: macos-aarch64
+            kind: macos
+          - os: ubuntu-22.04
+            artifact: linux-x86_64
+            kind: portable
+            bin: rs-nes
+          - os: windows-latest
+            artifact: windows-x86_64
+            kind: portable
+            bin: rs-nes.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux deps (GLFW / ALSA / GTK)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglfw3-dev libasound2-dev libgtk-3-dev
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package macOS .app + DMG
+        if: matrix.kind == 'macos'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          OUT="dist/${{ matrix.artifact }}"
+          APP="$OUT/rs-nes.app"
+          DMG="$OUT/rs-nes-${VERSION}-${{ matrix.artifact }}.dmg"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/release/rs-nes "$APP/Contents/MacOS/rs-nes"
+          chmod +x "$APP/Contents/MacOS/rs-nes"
+          sed "s/0\\.1\\.0/${VERSION}/g" scripts/Info.plist > "$APP/Contents/Info.plist"
+          codesign --force --deep --sign - "$APP" || true
+          STAGING="$(mktemp -d)"
+          cp -R "$APP" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+          hdiutil create -volname "rs-nes" -srcfolder "$STAGING" -ov -format UDZO "$DMG"
+          rm -rf "$STAGING"
+          ls -lh "$APP/Contents/MacOS/rs-nes" "$DMG"
+
+      - name: Package portable binary
+        if: matrix.kind == 'portable'
+        shell: bash
+        run: |
+          mkdir -p "dist/${{ matrix.artifact }}"
+          cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.artifact }}/${{ matrix.bin }}"
+          ls -lh "dist/${{ matrix.artifact }}/${{ matrix.bin }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rs-nes-${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage release files
+        run: |
+          mkdir -p release
+          # macOS: ship the DMG (contains .app)
+          cp artifacts/rs-nes-macos-aarch64/*.dmg release/ || true
+          # Also attach the .app as a zip for convenience
+          if [[ -d artifacts/rs-nes-macos-aarch64/rs-nes.app ]]; then
+            (cd artifacts/rs-nes-macos-aarch64 && zip -r "$GITHUB_WORKSPACE/release/rs-nes-macos-aarch64.app.zip" rs-nes.app)
+          fi
+          cp artifacts/rs-nes-linux-x86_64/rs-nes release/rs-nes-linux-x86_64
+          cp artifacts/rs-nes-windows-x86_64/rs-nes.exe release/rs-nes-windows-x86_64.exe
+          chmod +x release/rs-nes-linux-x86_64 || true
+          ls -lh release/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
