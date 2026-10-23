@@ -138,3 +138,28 @@ mod tests {
         assert_eq!(nes.frame(), f0 + 3);
     }
 }
+
+#[cfg(test)]
+mod jackal_boot {
+    use super::*;
+    use crate::cart::Loader;
+
+    /// Jackal polls `$2002` with NMI enabled; coarse CPU/PPU timing used to hang
+    /// forever in that wait (black screen). Guard the boot path.
+    #[test]
+    fn jackal_lights_pixels_within_60_frames() {
+        let rom = Loader::load("roms/jackal.nes").unwrap();
+        let mut nes = Nes::from_rom(rom).unwrap();
+        nes.run_frames(60).unwrap();
+        let lit = nes
+            .framebuffer()
+            .chunks(3)
+            .filter(|p| *p != [0, 0, 0])
+            .count();
+        assert!(
+            lit > 100,
+            "Jackal black screen regression: lit={lit} pc=${:04X}",
+            nes.pc()
+        );
+    }
+}

@@ -48,16 +48,17 @@ void main() {
 }
 "#;
 
-// Flip V so PPU top row appears at top of the window.
+// uFlipY: NES PPU upload needs V flip; UI FBO is already top-correct.
 // uFilter: 0 Sharp, 1 Smooth, 2 Scanlines, 3 CRT
 const FRAG_SRC: &str = r#"#version 330 core
 in vec2 vUv;
 out vec4 FragColor;
 uniform sampler2D uTex;
 uniform int uFilter;
+uniform int uFlipY;
 
 void main() {
-    vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
+    vec2 uv = uFlipY != 0 ? vec2(vUv.x, 1.0 - vUv.y) : vUv;
 
     if (uFilter == 3) {
         // Mild barrel curvature toward screen edges.
@@ -102,12 +103,21 @@ void main() {
 "#;
 
 /// Uploads the NES RGB framebuffer to a GL texture and draws a fullscreen quad.
+///
+/// Also owns an offscreen FBO so the NES OS shell can be drawn and then presented
+/// through the same video filter as games.
 pub struct GlPresenter {
     program: u32,
     vao: u32,
     vbo: u32,
     texture: u32,
     u_filter: i32,
+    u_flip_y: i32,
+    /// Offscreen target for shell UI (window-sized).
+    ui_fbo: u32,
+    ui_tex: u32,
+    ui_w: i32,
+    ui_h: i32,
 }
 
 impl GlPresenter {
@@ -177,6 +187,12 @@ impl GlPresenter {
             let loc = gl::GetUniformLocation(program, c"uTex".as_ptr());
             gl::Uniform1i(loc, 0);
             let u_filter = gl::GetUniformLocation(program, c"uFilter".as_ptr());
+            let u_flip_y = gl::GetUniformLocation(program, c"uFlipY".as_ptr());
+
+            let mut ui_fbo = 0;
+            let mut ui_tex = 0;
+            gl::GenFramebuffers(1, &mut ui_fbo);
+            gl::GenTextures(1, &mut ui_tex);
 
             Ok(Self {
                 program,
@@ -184,7 +200,96 @@ impl GlPresenter {
                 vbo,
                 texture,
                 u_filter,
+                u_flip_y,
+                ui_fbo,
+                ui_tex,
+                ui_w: 0,
+                ui_h: 0,
             })
+        }
+    }
+
+    /// Resize the shell UI offscreen buffer if the window framebuffer changed.
+    pub fn ensure_ui_target(&mut self, width: i32, height: i32) {
+        let width = width.max(1);
+        let height = height.max(1);
+        if self.ui_w == width && self.ui_h == height {
+            return;
+        }
+        self.ui_w = width;
+        self.ui_h = height;
+        unsafe {
+            gl::BindTexture(gl::TEXTURE_2D, self.ui_tex);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::RGB as i32,
+                width,
+                height,
+                0,
+                gl::RGB,
+                gl::UNSIGNED_BYTE,
+                ptr::null(),
+            );
+            gl::BindFramebuffer(gl::FRAMEBUFFER, self.ui_fbo);
+            gl::FramebufferTexture2D(
+                gl::FRAMEBUFFER,
+                gl::COLOR_ATTACHMENT0,
+                gl::TEXTURE_2D,
+                self.ui_tex,
+                0,
+            );
+            let status = gl::CheckFramebufferStatus(gl::FRAMEBUFFER);
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            debug_assert_eq!(status, gl::FRAMEBUFFER_COMPLETE);
+        }
+    }
+
+    /// Bind the shell UI FBO and clear it (call before drawing the OS overlay).
+    pub fn begin_ui(&self, clear: [f32; 4]) {
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER, self.ui_fbo);
+            gl::Viewport(0, 0, self.ui_w, self.ui_h);
+            gl::ClearColor(clear[0], clear[1], clear[2], clear[3]);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+        }
+    }
+
+    /// Present the shell UI texture to the default framebuffer with the active filter.
+    pub fn present_ui(&self, fb_width: i32, fb_height: i32, filter: VideoFilter) {
+        let filter_id = match filter {
+            VideoFilter::Sharp => 0,
+            VideoFilter::Smooth => 1,
+            VideoFilter::Scanlines => 2,
+            VideoFilter::Crt => 3,
+        };
+        let mag = match filter {
+            VideoFilter::Smooth => gl::LINEAR,
+            _ => gl::NEAREST,
+        };
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            gl::Viewport(0, 0, fb_width, fb_height);
+            gl::ClearColor(0.0, 0.0, 0.0, 1.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+            gl::UseProgram(self.program);
+            if self.u_filter >= 0 {
+                gl::Uniform1i(self.u_filter, filter_id);
+            }
+            if self.u_flip_y >= 0 {
+                gl::Uniform1i(self.u_flip_y, 0);
+            }
+            gl::ActiveTexture(gl::TEXTURE0);
+            gl::BindTexture(gl::TEXTURE_2D, self.ui_tex);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, mag as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, mag as i32);
+            gl::BindVertexArray(self.vao);
+            gl::DrawArrays(gl::TRIANGLES, 0, 6);
+            gl::BindVertexArray(0);
         }
     }
 
@@ -230,6 +335,9 @@ impl GlPresenter {
             if self.u_filter >= 0 {
                 gl::Uniform1i(self.u_filter, filter_id);
             }
+            if self.u_flip_y >= 0 {
+                gl::Uniform1i(self.u_flip_y, 1);
+            }
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, self.texture);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, mag as i32);
@@ -271,6 +379,8 @@ impl Drop for GlPresenter {
             gl::DeleteVertexArrays(1, &self.vao);
             gl::DeleteBuffers(1, &self.vbo);
             gl::DeleteTextures(1, &self.texture);
+            gl::DeleteTextures(1, &self.ui_tex);
+            gl::DeleteFramebuffers(1, &self.ui_fbo);
         }
     }
 }

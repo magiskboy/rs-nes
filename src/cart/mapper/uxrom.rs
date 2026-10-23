@@ -6,7 +6,11 @@
 //! ```
 //!
 //! Any CPU write to `$8000–$FFFF` selects the switchable bank (low bits of the
-//! value). CHR is almost always 8 KiB RAM (handled by [`crate::cart::mapper::Cartridge`]).
+//! value). Commercial UNROM boards also AND that value with the ROM byte at the
+//! address ([bus conflicts](https://www.nesdev.org/wiki/UxROM#Bus_conflicts));
+//! [`Cartridge::cpu_write`](crate::cart::mapper::Cartridge::cpu_write) applies that
+//! for mapper 2 (needed by Jackal when leaving bank 7).
+//! CHR is almost always 8 KiB RAM (handled by [`crate::cart::mapper::Cartridge`]).
 
 #[derive(Debug)]
 pub struct Uxrom {

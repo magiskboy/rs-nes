@@ -15,6 +15,9 @@ glfw = "0.59"
 gl = "0.14"
 cpal = "0.15"
 rfd = "0.15"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "0.8"
 
 [build-dependencies]
 embed-resource = "3.0"

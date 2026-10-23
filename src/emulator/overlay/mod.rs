@@ -1,6 +1,7 @@
 //! Immediate-mode GL UI: solid rects + 8×8 bitmap text (screen-pixel coords).
 
 mod font8x8;
+mod nitendo_logo;
 
 use font8x8::FONT8X8;
 use std::ffi::{CStr, CString};
@@ -15,12 +16,18 @@ const FLOATS_PER_QUAD: usize = FLOATS_PER_VERT * VERTS_PER_QUAD;
 const MAX_QUADS: usize = 4096;
 const MAX_FLOATS: usize = MAX_QUADS * FLOATS_PER_QUAD;
 
+/// Sample mode: solid rect / R8 font / RGBA image.
+const MODE_SOLID_OR_FONT: i32 = 0;
+const MODE_RGBA: i32 = 1;
+
 /// Overlay drawer in top-left origin pixel space.
 pub struct Overlay {
     program: u32,
     vao: u32,
     vbo: u32,
     font_tex: u32,
+    logo_tex: u32,
+    u_mode: i32,
     /// Interleaved: x y u v r g b a
     verts: Vec<f32>,
     fb_w: f32,
@@ -58,16 +65,77 @@ impl Overlay {
             gl::BindVertexArray(0);
 
             let font_tex = build_font_texture()?;
+            let logo_tex = build_logo_texture()?;
+            let u_mode = gl::GetUniformLocation(program, c"uMode".as_ptr());
 
             Ok(Self {
                 program,
                 vao,
                 vbo,
                 font_tex,
+                logo_tex,
+                u_mode,
                 verts: Vec::with_capacity(1024),
                 fb_w: 1.0,
                 fb_h: 1.0,
             })
+        }
+    }
+
+    /// Pixel size of the baked Nitendo badge (`nitendo_logo`).
+    pub fn logo_size() -> (f32, f32) {
+        (nitendo_logo::LOGO_W as f32, nitendo_logo::LOGO_H as f32)
+    }
+
+    /// Draw the baked Nitendo logo (RGBA texture), flushing any pending quads first.
+    pub fn draw_logo(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.flush();
+        let rgba = [1.0, 1.0, 1.0, 1.0];
+        let mut verts = Vec::with_capacity(FLOATS_PER_QUAD);
+        let [r, g, b, a] = rgba;
+        let x0 = x;
+        let y0 = y;
+        let x1 = x + w;
+        let y1 = y + h;
+        for (px, py, u, v) in [
+            (x0, y0, 0.0, 0.0),
+            (x0, y1, 0.0, 1.0),
+            (x1, y1, 1.0, 1.0),
+            (x0, y0, 0.0, 0.0),
+            (x1, y1, 1.0, 1.0),
+            (x1, y0, 1.0, 0.0),
+        ] {
+            verts.extend_from_slice(&[px, py, u, v, r, g, b, a]);
+        }
+        unsafe {
+            gl::Disable(gl::DEPTH_TEST);
+            gl::Enable(gl::BLEND);
+            gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+            gl::Viewport(0, 0, self.fb_w as i32, self.fb_h as i32);
+
+            gl::UseProgram(self.program);
+            let loc = gl::GetUniformLocation(self.program, c"uScreen".as_ptr());
+            gl::Uniform2f(loc, self.fb_w, self.fb_h);
+            gl::Uniform1i(self.u_mode, MODE_RGBA);
+
+            gl::ActiveTexture(gl::TEXTURE0);
+            gl::BindTexture(gl::TEXTURE_2D, self.logo_tex);
+            let tloc = gl::GetUniformLocation(self.program, c"uFont".as_ptr());
+            gl::Uniform1i(tloc, 0);
+
+            gl::BindVertexArray(self.vao);
+            gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
+            gl::BufferSubData(
+                gl::ARRAY_BUFFER,
+                0,
+                (verts.len() * std::mem::size_of::<f32>()) as isize,
+                verts.as_ptr() as *const _,
+            );
+            gl::DrawArrays(gl::TRIANGLES, 0, 6);
+            gl::BindVertexArray(0);
+
+            gl::Uniform1i(self.u_mode, MODE_SOLID_OR_FONT);
+            gl::Disable(gl::BLEND);
         }
     }
 
@@ -126,6 +194,7 @@ impl Overlay {
             gl::UseProgram(self.program);
             let loc = gl::GetUniformLocation(self.program, c"uScreen".as_ptr());
             gl::Uniform2f(loc, self.fb_w, self.fb_h);
+            gl::Uniform1i(self.u_mode, MODE_SOLID_OR_FONT);
 
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, self.font_tex);
@@ -189,6 +258,7 @@ impl Drop for Overlay {
             gl::DeleteVertexArrays(1, &self.vao);
             gl::DeleteBuffers(1, &self.vbo);
             gl::DeleteTextures(1, &self.font_tex);
+            gl::DeleteTextures(1, &self.logo_tex);
         }
     }
 }
@@ -234,6 +304,32 @@ unsafe fn build_font_texture() -> Result<u32, String> {
     }
 }
 
+unsafe fn build_logo_texture() -> Result<u32, String> {
+    let pixels = nitendo_logo::bake_rgba();
+    unsafe {
+        let mut tex = 0;
+        gl::GenTextures(1, &mut tex);
+        gl::BindTexture(gl::TEXTURE_2D, tex);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+        gl::PixelStorei(gl::UNPACK_ALIGNMENT, 4);
+        gl::TexImage2D(
+            gl::TEXTURE_2D,
+            0,
+            gl::RGBA as i32,
+            nitendo_logo::LOGO_W as i32,
+            nitendo_logo::LOGO_H as i32,
+            0,
+            gl::RGBA,
+            gl::UNSIGNED_BYTE,
+            pixels.as_ptr() as *const _,
+        );
+        Ok(tex)
+    }
+}
+
 const VERT_SRC: &str = r#"#version 330 core
 layout (location = 0) in vec2 aPos;
 layout (location = 1) in vec2 aUv;
@@ -254,8 +350,11 @@ in vec2 vUv;
 in vec4 vColor;
 out vec4 FragColor;
 uniform sampler2D uFont;
+uniform int uMode;
 void main() {
-    if (vUv.x < 0.0) {
+    if (uMode == 1) {
+        FragColor = texture(uFont, vUv) * vColor;
+    } else if (vUv.x < 0.0) {
         FragColor = vColor;
     } else {
         float a = texture(uFont, vUv).r;

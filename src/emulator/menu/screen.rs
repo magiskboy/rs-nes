@@ -31,6 +31,9 @@ impl ScreenId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
     Resume,
+    ResetGame,
+    Screenshot,
+    ExitToLibrary,
     Quit,
     Goto(ScreenId),
     Back,
@@ -61,6 +64,9 @@ impl ItemKind {
     pub fn label(self, ctx: &LabelCtx<'_>) -> String {
         match self {
             ItemKind::Resume => "Resume".into(),
+            ItemKind::ResetGame => "Reset game".into(),
+            ItemKind::Screenshot => "Screenshot".into(),
+            ItemKind::ExitToLibrary => "Exit to OS".into(),
             ItemKind::Quit => "Quit".into(),
             ItemKind::Goto(ScreenId::Settings) => "Settings".into(),
             ItemKind::Goto(ScreenId::Controllers) => "Controllers".into(),
@@ -120,8 +126,9 @@ impl ItemKind {
 
 const PAUSE_ITEMS: &[ItemKind] = &[
     ItemKind::Resume,
-    ItemKind::Goto(ScreenId::Settings),
-    ItemKind::Quit,
+    ItemKind::ResetGame,
+    ItemKind::Screenshot,
+    ItemKind::ExitToLibrary,
 ];
 
 const SETTINGS_ITEMS: &[ItemKind] = &[
@@ -183,10 +190,10 @@ pub fn hint_for(id: ScreenId, waiting_bind: bool, map_target: MapTarget) -> &'st
         };
     }
     match id {
-        ScreenId::Pause => "Arrows/WASD  Enter  Esc",
-        ScreenId::Settings => "Left/Right adjust   Enter   Esc back",
-        ScreenId::Controllers => "Left/Right change device   Enter   Esc",
-        ScreenId::ButtonMap => "Left/Right device   Enter rebind   Esc",
+        ScreenId::Pause => "D-pad  Start OK  Select/B back",
+        ScreenId::Settings => "D-pad adjust  Start OK  B back",
+        ScreenId::Controllers => "D-pad change  Start OK  B back",
+        ScreenId::ButtonMap => "D-pad device  Start rebind  B back",
     }
 }
 

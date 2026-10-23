@@ -4,8 +4,8 @@
 
 mod debug_hud;
 mod draw;
-mod input;
-mod screen;
+pub(crate) mod input;
+pub(crate) mod screen;
 mod settings;
 
 pub use debug_hud::draw_debug;
@@ -27,6 +27,12 @@ pub enum UiAction {
     /// Apply volume / fullscreen / debug toggles that changed.
     ApplySettings,
     Quit,
+    /// Soft power-cycle the loaded cartridge (stay in-game).
+    ResetGame,
+    /// Capture the current NES framebuffer to disk.
+    Screenshot,
+    /// Leave the current game and return to NES OS library.
+    ExitToLibrary,
 }
 
 pub struct Menu {
@@ -43,10 +49,14 @@ pub struct Menu {
 
 impl Menu {
     pub fn new() -> Self {
+        Self::with_settings(Settings::default())
+    }
+
+    pub fn with_settings(settings: Settings) -> Self {
         Self {
             stack: Vec::new(),
             sels: [0; ScreenId::COUNT],
-            settings: Settings::default(),
+            settings,
             map_target: MapTarget::Keyboard,
             waiting_bind: None,
             capture_baseline_ready: false,
@@ -110,6 +120,19 @@ impl Menu {
         }
     }
 
+    /// Open the settings tree from NES OS (no Pause frame on the stack).
+    pub fn open_settings(&mut self) {
+        self.cancel_capture();
+        self.stack.clear();
+        self.push(ScreenId::Settings);
+    }
+
+    /// Clear all menu screens (e.g. entering / leaving a game).
+    pub fn close_all(&mut self) {
+        self.cancel_capture();
+        self.stack.clear();
+    }
+
     fn push(&mut self, id: ScreenId) {
         self.sels[id.index()] = 0;
         self.stack.push(id);
@@ -123,12 +146,12 @@ impl Menu {
     ///
     /// Uses edge detection: buttons already held when capture starts are ignored
     /// until released, so a stuck/phantom hold can't block remapping forever.
-    pub fn poll_bind_capture(&mut self, glfw: &Glfw) {
+    pub fn poll_bind_capture(&mut self, glfw: &Glfw) -> UiAction {
         if self.map_target != MapTarget::Gamepad {
-            return;
+            return UiAction::None;
         }
         let Some(nes_btn) = self.waiting_bind else {
-            return;
+            return UiAction::None;
         };
 
         let held = held_gamepad_buttons(glfw);
@@ -136,7 +159,7 @@ impl Menu {
         if !self.capture_baseline_ready {
             self.capture_ignore = held;
             self.capture_baseline_ready = true;
-            return;
+            return UiAction::None;
         }
 
         self.capture_ignore
@@ -150,7 +173,9 @@ impl Menu {
             self.waiting_bind = None;
             self.capture_baseline_ready = false;
             self.capture_ignore.clear();
+            return UiAction::ApplySettings;
         }
+        UiAction::None
     }
 
     /// Handle a raw key press for menu navigation (only while paused).
@@ -169,6 +194,7 @@ impl Menu {
                 self.waiting_bind = None;
                 self.capture_baseline_ready = false;
                 self.capture_ignore.clear();
+                return UiAction::ApplySettings;
             } else if matches!(key, Key::X | Key::Backspace) {
                 self.cancel_capture();
             }
@@ -181,7 +207,8 @@ impl Menu {
         self.on_nav(nav)
     }
 
-    fn on_nav(&mut self, nav: NavAction) -> UiAction {
+    /// Navigate with a semantic action (from NES pad buttons in the OS shell).
+    pub fn on_nav(&mut self, nav: NavAction) -> UiAction {
         let Some(id) = self.top_screen() else {
             return UiAction::None;
         };
@@ -215,6 +242,15 @@ impl Menu {
             Kind::Resume => {
                 self.stack.clear();
                 UiAction::None
+            }
+            Kind::ResetGame => {
+                self.stack.clear();
+                UiAction::ResetGame
+            }
+            Kind::Screenshot => UiAction::Screenshot,
+            Kind::ExitToLibrary => {
+                self.stack.clear();
+                UiAction::ExitToLibrary
             }
             Kind::Quit => UiAction::Quit,
             Kind::Goto(id) => {
@@ -255,7 +291,7 @@ impl Menu {
                         self.settings.gamepad = GamepadMap::default();
                     }
                 }
-                UiAction::None
+                UiAction::ApplySettings
             }
         }
     }
@@ -277,7 +313,7 @@ impl Menu {
             }
             Kind::VideoFilter => {
                 self.settings.video_filter = self.settings.video_filter.cycle(dir);
-                UiAction::None
+                UiAction::ApplySettings
             }
             Kind::Player1 => {
                 self.settings.devices.player1 = self
@@ -285,7 +321,7 @@ impl Menu {
                     .devices
                     .player1
                     .cycle(&InputDevice::PLAYER1_OPTIONS, dir);
-                UiAction::None
+                UiAction::ApplySettings
             }
             Kind::Player2 => {
                 self.settings.devices.player2 = self
@@ -293,7 +329,7 @@ impl Menu {
                     .devices
                     .player2
                     .cycle(&InputDevice::PLAYER2_OPTIONS, dir);
-                UiAction::None
+                UiAction::ApplySettings
             }
             Kind::MapDevice => {
                 self.map_target = self.map_target.cycle(dir);

@@ -191,14 +191,14 @@ pub struct KeyboardMap {
 impl Default for KeyboardMap {
     fn default() -> Self {
         Self {
-            a: Key::Z,
-            b: Key::X,
+            a: Key::N,
+            b: Key::M,
             start: Key::Enter,
             select: Key::RightShift,
-            up: Key::Up,
-            down: Key::Down,
-            left: Key::Left,
-            right: Key::Right,
+            up: Key::W,
+            down: Key::S,
+            left: Key::A,
+            right: Key::D,
         }
     }
 }
@@ -685,9 +685,9 @@ mod tests {
     fn keyboard_maps_default_face_and_dpad() {
         let map = KeyboardMap::default();
         let mut keys = HashSet::new();
-        keys.insert(Key::Z);
-        keys.insert(Key::Up);
-        keys.insert(Key::Left);
+        keys.insert(Key::N);
+        keys.insert(Key::W);
+        keys.insert(Key::A);
         let m = buttons_from_keys(&keys, &map);
         assert_ne!(m & Button::A as u8, 0);
         assert_ne!(m & Button::Up as u8, 0);
@@ -701,14 +701,14 @@ mod tests {
         map.set(NesPadButton::A, Key::J);
         let m = buttons_from_keys(&HashSet::from([Key::J]), &map);
         assert_ne!(m & Button::A as u8, 0);
-        assert_eq!(buttons_from_keys(&HashSet::from([Key::Z]), &map) & Button::A as u8, 0);
+        assert_eq!(buttons_from_keys(&HashSet::from([Key::N]), &map) & Button::A as u8, 0);
     }
 
     #[test]
     fn keyboard_or_merge_is_additive() {
         let map = KeyboardMap::default();
-        let a = buttons_from_keys(&HashSet::from([Key::Z]), &map);
-        let b = buttons_from_keys(&HashSet::from([Key::X]), &map);
+        let a = buttons_from_keys(&HashSet::from([Key::N]), &map);
+        let b = buttons_from_keys(&HashSet::from([Key::M]), &map);
         assert_eq!(a | b, (Button::A as u8) | (Button::B as u8));
     }
 

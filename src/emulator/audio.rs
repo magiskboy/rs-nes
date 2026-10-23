@@ -2,6 +2,7 @@ use crate::apu::Apu;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 use std::collections::VecDeque;
+use std::f32::consts::TAU;
 use std::sync::{Arc, Mutex};
 
 /// Take all pending APU samples.
@@ -12,6 +13,15 @@ pub fn take_samples(apu: &mut Apu) -> Vec<f32> {
 /// Drop buffered samples without returning them.
 pub fn clear_samples(apu: &mut Apu) {
     let _ = apu.take_samples();
+}
+
+/// Short UI beeps for the NES OS shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiSfx {
+    Move,
+    Confirm,
+    Back,
+    Select,
 }
 
 /// Real-time audio output backed by cpal + a shared mono ring.
@@ -107,9 +117,47 @@ impl AudioOut {
         }
     }
 
+    /// Play a short square-wave UI beep (OS shell navigation).
+    pub fn play_sfx(&self, sfx: UiSfx) {
+        let samples = synthesize_sfx(sfx, self.sample_rate);
+        self.push_samples(&samples);
+    }
+
     pub fn queued(&self) -> usize {
         self.queue.lock().unwrap().len()
     }
+}
+
+fn synthesize_sfx(sfx: UiSfx, sample_rate: u32) -> Vec<f32> {
+    // (freq_hz, duration_ms, amplitude)
+    let notes: &[(f32, f32, f32)] = match sfx {
+        UiSfx::Move => &[(880.0, 35.0, 0.18)],
+        UiSfx::Confirm => &[(660.0, 40.0, 0.22), (990.0, 55.0, 0.20)],
+        UiSfx::Back => &[(440.0, 45.0, 0.16), (330.0, 50.0, 0.14)],
+        UiSfx::Select => &[(520.0, 30.0, 0.18), (780.0, 45.0, 0.18)],
+    };
+
+    let sr = sample_rate as f32;
+    let mut out = Vec::new();
+    for &(freq, ms, amp) in notes {
+        let n = ((ms / 1000.0) * sr).round().max(1.0) as usize;
+        for i in 0..n {
+            let t = i as f32 / sr;
+            let env = {
+                let attack = (i as f32 / (n as f32 * 0.12)).min(1.0);
+                let release = 1.0 - (i as f32 / n as f32) * 0.85;
+                attack * release
+            };
+            let phase = (t * freq * TAU).sin();
+            // Soft square for a slightly NES-like click.
+            let sq = if phase >= 0.0 { 1.0 } else { -1.0 };
+            out.push(sq * amp * env);
+        }
+        // Tiny gap between notes in multi-tone SFX.
+        let gap = (sr * 0.008) as usize;
+        out.extend(std::iter::repeat_n(0.0, gap));
+    }
+    out
 }
 
 #[cfg(test)]

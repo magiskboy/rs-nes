@@ -32,6 +32,9 @@ pub struct Bus {
     dma_cycles: u32,
     /// Odd/even CPU cycle for DMA length (513 vs 514).
     pub cpu_odd_cycle: bool,
+    /// CPU cycles already advanced mid-instruction (e.g. before `$2002` read).
+    /// Subtracted from the end-of-instruction [`Bus::tick`] so PPU time is not double-counted.
+    prepaid_cpu_cycles: u32,
 }
 
 impl Bus {
@@ -49,6 +52,7 @@ impl Bus {
             cart: None,
             dma_cycles: 0,
             cpu_odd_cycle: false,
+            prepaid_cpu_cycles: 0,
         }
     }
 
@@ -123,6 +127,19 @@ impl Bus {
         let n = self.dma_cycles;
         self.dma_cycles = 0;
         n
+    }
+
+    /// Cycles already ticked during the current instruction (via [`Bus::tick_prepay`]).
+    pub fn take_prepaid_cycles(&mut self) -> u32 {
+        let n = self.prepaid_cpu_cycles;
+        self.prepaid_cpu_cycles = 0;
+        n
+    }
+
+    /// Advance peripherals and count those cycles toward the current instruction budget.
+    pub fn tick_prepay(&mut self, cpu_cycles: u32) {
+        self.tick(cpu_cycles);
+        self.prepaid_cpu_cycles = self.prepaid_cpu_cycles.saturating_add(cpu_cycles);
     }
 
     pub fn read(&mut self, addr: u16) -> u8 {

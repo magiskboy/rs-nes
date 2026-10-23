@@ -235,6 +235,15 @@ impl Cartridge {
 
     /// CPU write (mapper registers / PRG-RAM). PRG-ROM itself stays read-only.
     pub fn cpu_write(&mut self, addr: u16, value: u8) {
+        // UxROM (mapper 2): commercial UNROM boards AND CPU data with the ROM byte
+        // at the written address (bus conflict). Jackal relies on this when leaving
+        // bank 7 (identity table is `$AA` there — see nesdev Game_bugs).
+        let value = if self.mapper_id == 2 && (0x8000..=0xFFFF).contains(&addr) {
+            let rom_byte = self.mapper.cpu_read(addr, &self.prg_rom, &self.prg_ram);
+            value & rom_byte
+        } else {
+            value
+        };
         self.mapper
             .cpu_write(addr, value, &mut self.prg_ram);
     }

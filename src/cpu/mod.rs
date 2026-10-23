@@ -102,7 +102,12 @@ impl Cpu {
         let _opcode = self.fetch()?;
         let (decoded, effective) = self.decode_instruction()?;
         let cycles = self.execute(&decoded.instruction, decoded.next as u16, effective)? as u32;
-        self.bus.tick(cycles);
+        // Mid-instruction PPU advances (e.g. before `$2002`) are prepaid; only tick the rest.
+        let prepaid = self.bus.take_prepaid_cycles();
+        let rest = cycles.saturating_sub(prepaid);
+        if rest > 0 {
+            self.bus.tick(rest);
+        }
         self.add_cycles(cycles as u8);
 
         let dma = self.bus.take_dma_cycles();
@@ -633,6 +638,13 @@ impl Cpu {
     // -------------------------------------------------------------------------
 
     fn read(&mut self, addr: u16) -> u8 {
+        // PPUSTATUS is latched on the final cycle of a read instruction. Advance most of a
+        // typical absolute read (3 of 4 CPU cycles) before sampling so VBlank that starts
+        // mid-instruction is visible. Jackal polls `$2002` with NMI enabled; without this,
+        // NMI always clears VBlank before the next `LDA` and the wait-loop hangs forever.
+        if (0x2000..=0x3FFF).contains(&addr) && addr & 7 == 2 {
+            self.bus.tick_prepay(3);
+        }
         self.bus.read(addr)
     }
 

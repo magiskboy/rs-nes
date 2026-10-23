@@ -1,10 +1,11 @@
-//! Pause / settings overlay drawing (centered dialog panel).
+//! Pause / settings overlay drawing — same CRT palette as NES OS.
 
 use crate::emulator::menu::screen::{
-    ItemKind, LabelCtx, ScreenId, hint_for, layout_scale, row_step, screen_def,
+    LabelCtx, ScreenId, hint_for, layout_scale, row_step, screen_def,
 };
 use crate::emulator::menu::Menu;
 use crate::emulator::overlay::Overlay;
+use crate::emulator::theme;
 use glfw::Glfw;
 
 const PAD_X: f32 = 18.0;
@@ -38,7 +39,7 @@ pub fn draw_menu(
 
     let labels: Vec<String> = def.items.iter().map(|item| item.label(&ctx)).collect();
     let (panel_w, panel_h, content) =
-        measure_dialog(id, scale, title_mul, def.title, def.items, &labels, hint);
+        measure_dialog(id, scale, title_mul, def.title, &labels, hint);
 
     let panel_x = ((fb_w as f32 - panel_w) * 0.5).round();
     let panel_y = ((fb_h as f32 - panel_h) * 0.5).round();
@@ -46,21 +47,21 @@ pub fn draw_menu(
     // Dim backdrop
     overlay.fill_rect(0.0, 0.0, fb_w as f32, fb_h as f32, [0.0, 0.0, 0.0, 0.55]);
 
-    // Dialog: border + solid panel
+    // Dialog: OS-style cyan border + panel
     let border = (BORDER * scale).max(2.0);
     overlay.fill_rect(
         panel_x - border,
         panel_y - border,
         panel_w + border * 2.0,
         panel_h + border * 2.0,
-        [0.55, 0.55, 0.58, 0.95],
+        theme::BORDER,
     );
     overlay.fill_rect(
         panel_x,
         panel_y,
         panel_w,
         panel_h,
-        [0.08, 0.09, 0.12, 0.96],
+        theme::BG_PANEL,
     );
 
     // Title
@@ -71,29 +72,33 @@ pub fn draw_menu(
         panel_x + (panel_w - tw) * 0.5,
         y,
         title_scale,
-        [1.0, 1.0, 1.0, 1.0],
+        theme::TITLE,
         def.title,
     );
     y += 8.0 * title_scale + content.title_gap;
 
-    // Thin separator under title
     let sep_w = panel_w - content.pad_x * 2.0;
     overlay.fill_rect(
         panel_x + content.pad_x,
         y - content.title_gap * 0.45,
         sep_w,
         (1.0 * scale).max(1.0),
-        [0.35, 0.35, 0.40, 0.9],
+        theme::BORDER_DIM,
     );
 
     let step = row_step(id, scale);
-    for (i, (item, line)) in def.items.iter().zip(labels.iter()).enumerate() {
-        draw_menu_line(overlay, panel_x, panel_w, y, scale, i == menu.sel(), line);
-
-        if matches!(item, ItemKind::Volume) {
-            draw_volume_bar(overlay, panel_x, panel_w, y, scale, menu.settings.volume);
-            y += 8.0 * scale;
-        }
+    let blink = true; // selection prefix always shown; OS blinks in shell only
+    for (i, line) in labels.iter().enumerate() {
+        draw_menu_line(
+            overlay,
+            panel_x,
+            panel_w,
+            y,
+            scale,
+            i == menu.sel(),
+            blink,
+            line,
+        );
         y += step;
     }
 
@@ -104,7 +109,7 @@ pub fn draw_menu(
         panel_x + (panel_w - hw) * 0.5,
         y,
         hint_scale,
-        [0.65, 0.65, 0.68, 1.0],
+        theme::TEXT_DIM,
         hint,
     );
 }
@@ -121,7 +126,6 @@ fn measure_dialog(
     scale: f32,
     title_mul: f32,
     title: &str,
-    items: &[ItemKind],
     labels: &[String],
     hint: &str,
 ) -> (f32, f32, DialogMetrics) {
@@ -139,21 +143,12 @@ fn measure_dialog(
         .max(MIN_CONTENT_W * scale);
 
     for line in labels {
-        // "> " prefix for selected row
         let w = Overlay::text_width(&format!("> {line}"), scale);
         content_w = content_w.max(w);
     }
-    if items.iter().any(|i| matches!(i, ItemKind::Volume)) {
-        content_w = content_w.max(160.0 * scale);
-    }
 
     let mut content_h = 8.0 * title_scale + title_gap;
-    for item in items {
-        content_h += step;
-        if matches!(item, ItemKind::Volume) {
-            content_h += 8.0 * scale;
-        }
-    }
+    content_h += step * labels.len() as f32;
     content_h += hint_gap + 8.0 * hint_scale;
 
     let panel_w = content_w + pad_x * 2.0;
@@ -171,27 +166,6 @@ fn measure_dialog(
     )
 }
 
-fn draw_volume_bar(
-    overlay: &mut Overlay,
-    panel_x: f32,
-    panel_w: f32,
-    y: f32,
-    scale: f32,
-    volume: f32,
-) {
-    let bar_w = (160.0 * scale).min(panel_w - PAD_X * scale * 2.0);
-    let bar_x = panel_x + (panel_w - bar_w) * 0.5;
-    let bar_y = y + 10.0 * scale;
-    overlay.fill_rect(bar_x, bar_y, bar_w, 4.0 * scale, [0.22, 0.22, 0.26, 1.0]);
-    overlay.fill_rect(
-        bar_x,
-        bar_y,
-        bar_w * volume,
-        4.0 * scale,
-        [0.3, 0.85, 0.4, 1.0],
-    );
-}
-
 fn draw_menu_line(
     overlay: &mut Overlay,
     panel_x: f32,
@@ -199,14 +173,32 @@ fn draw_menu_line(
     y: f32,
     scale: f32,
     selected: bool,
+    blink: bool,
     label: &str,
 ) {
+    if selected {
+        overlay.fill_rect(
+            panel_x + 4.0 * scale,
+            y - 1.0 * scale,
+            panel_w - 8.0 * scale,
+            12.0 * scale,
+            theme::SELECT_BG,
+        );
+    }
     let color = if selected {
-        [1.0, 0.85, 0.2, 1.0]
+        theme::SELECT_TEXT
     } else {
-        [0.9, 0.9, 0.9, 1.0]
+        theme::TEXT
     };
-    let prefix = if selected { "> " } else { "  " };
+    let prefix = if selected {
+        if blink {
+            "> "
+        } else {
+            "  "
+        }
+    } else {
+        "  "
+    };
     let text = format!("{prefix}{label}");
     let lw = Overlay::text_width(&text, scale);
     overlay.text(panel_x + (panel_w - lw) * 0.5, y, scale, color, &text);
