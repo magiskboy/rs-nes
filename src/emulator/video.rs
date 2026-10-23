@@ -1,6 +1,42 @@
+//! NES framebuffer → OpenGL present (with optional display filters).
+
 use crate::ppu::{FRAMEBUFFER_SIZE, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::ffi::{CStr, CString};
 use std::ptr;
+
+/// How the NES picture is scaled / shaded on the host display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoFilter {
+    /// Integer scale, nearest-neighbor (crisp pixels).
+    #[default]
+    Sharp,
+    /// Bilinear upscale (softer).
+    Smooth,
+    /// Horizontal scanlines only.
+    Scanlines,
+    /// CRT-ish: curvature, scanlines, vignette, RGB mask.
+    Crt,
+}
+
+impl VideoFilter {
+    pub const ALL: [Self; 4] = [Self::Sharp, Self::Smooth, Self::Scanlines, Self::Crt];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sharp => "Sharp",
+            Self::Smooth => "Smooth",
+            Self::Scanlines => "Scanlines",
+            Self::Crt => "CRT",
+        }
+    }
+
+    pub fn cycle(self, dir: i32) -> Self {
+        let i = Self::ALL.iter().position(|&f| f == self).unwrap_or(0) as i32;
+        let n = Self::ALL.len() as i32;
+        let next = (i + dir).rem_euclid(n) as usize;
+        Self::ALL[next]
+    }
+}
 
 const VERT_SRC: &str = r#"#version 330 core
 layout (location = 0) in vec2 aPos;
@@ -13,12 +49,55 @@ void main() {
 "#;
 
 // Flip V so PPU top row appears at top of the window.
+// uFilter: 0 Sharp, 1 Smooth, 2 Scanlines, 3 CRT
 const FRAG_SRC: &str = r#"#version 330 core
 in vec2 vUv;
 out vec4 FragColor;
 uniform sampler2D uTex;
+uniform int uFilter;
+
 void main() {
-    FragColor = texture(uTex, vec2(vUv.x, 1.0 - vUv.y));
+    vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
+
+    if (uFilter == 3) {
+        // Mild barrel curvature toward screen edges.
+        vec2 cc = uv * 2.0 - 1.0;
+        float r2 = dot(cc, cc);
+        cc *= 1.0 + r2 * 0.06;
+        uv = cc * 0.5 + 0.5;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+            FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+    }
+
+    vec3 col = texture(uTex, uv).rgb;
+
+    if (uFilter == 2 || uFilter == 3) {
+        // Soft scanlines tied to NES vertical resolution.
+        float line = sin(uv.y * 240.0 * 3.14159265);
+        float scan = 0.78 + 0.22 * line * line;
+        col *= scan;
+    }
+
+    if (uFilter == 3) {
+        // Edge vignette
+        vec2 vc = uv * 2.0 - 1.0;
+        float vig = clamp(1.0 - dot(vc, vc) * 0.18, 0.55, 1.0);
+        col *= vig;
+
+        // Coarse RGB aperture (uses output pixels).
+        float triad = mod(gl_FragCoord.x, 3.0);
+        vec3 mask = triad < 1.0
+            ? vec3(1.15, 0.85, 0.85)
+            : (triad < 2.0 ? vec3(0.85, 1.15, 0.85) : vec3(0.85, 0.85, 1.15));
+        col *= mix(vec3(1.0), mask, 0.4);
+
+        // Compensate darkening from scanlines / mask.
+        col *= 1.2;
+    }
+
+    FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
 "#;
 
@@ -28,6 +107,7 @@ pub struct GlPresenter {
     vao: u32,
     vbo: u32,
     texture: u32,
+    u_filter: i32,
 }
 
 impl GlPresenter {
@@ -93,15 +173,17 @@ impl GlPresenter {
                 ptr::null(),
             );
 
-            let loc = gl::GetUniformLocation(program, c"uTex".as_ptr());
             gl::UseProgram(program);
+            let loc = gl::GetUniformLocation(program, c"uTex".as_ptr());
             gl::Uniform1i(loc, 0);
+            let u_filter = gl::GetUniformLocation(program, c"uFilter".as_ptr());
 
             Ok(Self {
                 program,
                 vao,
                 vbo,
                 texture,
+                u_filter,
             })
         }
     }
@@ -126,27 +208,60 @@ impl GlPresenter {
         }
     }
 
-    /// Draw letterboxed integer-scaled NES picture into the framebuffer.
-    pub fn draw(&self, fb_width: i32, fb_height: i32) {
-        let scale = ((fb_width / SCREEN_WIDTH as i32).max(1))
-            .min((fb_height / SCREEN_HEIGHT as i32).max(1));
-        let w = SCREEN_WIDTH as i32 * scale;
-        let h = SCREEN_HEIGHT as i32 * scale;
-        let x = (fb_width - w) / 2;
-        let y = (fb_height - h) / 2;
+    /// Draw letterboxed NES picture into the framebuffer with the chosen filter.
+    pub fn draw(&self, fb_width: i32, fb_height: i32, filter: VideoFilter) {
+        let (x, y, w, h) = present_rect(fb_width, fb_height, filter);
+        let filter_id = match filter {
+            VideoFilter::Sharp => 0,
+            VideoFilter::Smooth => 1,
+            VideoFilter::Scanlines => 2,
+            VideoFilter::Crt => 3,
+        };
+        let mag = match filter {
+            VideoFilter::Smooth => gl::LINEAR,
+            _ => gl::NEAREST,
+        };
 
         unsafe {
             gl::Viewport(x, y, w, h);
             gl::ClearColor(0.0, 0.0, 0.0, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
             gl::UseProgram(self.program);
+            if self.u_filter >= 0 {
+                gl::Uniform1i(self.u_filter, filter_id);
+            }
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, self.texture);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, mag as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, mag as i32);
             gl::BindVertexArray(self.vao);
             gl::DrawArrays(gl::TRIANGLES, 0, 6);
             gl::BindVertexArray(0);
         }
     }
+}
+
+fn present_rect(fb_width: i32, fb_height: i32, filter: VideoFilter) -> (i32, i32, i32, i32) {
+    let (w, h) = match filter {
+        // CRT looks better when the picture fills the window (still aspect-correct).
+        VideoFilter::Crt => {
+            let sx = fb_width as f32 / SCREEN_WIDTH as f32;
+            let sy = fb_height as f32 / SCREEN_HEIGHT as f32;
+            let s = sx.min(sy).max(1.0);
+            (
+                (SCREEN_WIDTH as f32 * s).round() as i32,
+                (SCREEN_HEIGHT as f32 * s).round() as i32,
+            )
+        }
+        _ => {
+            let scale = ((fb_width / SCREEN_WIDTH as i32).max(1))
+                .min((fb_height / SCREEN_HEIGHT as i32).max(1));
+            (SCREEN_WIDTH as i32 * scale, SCREEN_HEIGHT as i32 * scale)
+        }
+    };
+    let x = (fb_width - w) / 2;
+    let y = (fb_height - h) / 2;
+    (x, y, w, h)
 }
 
 impl Drop for GlPresenter {
@@ -204,4 +319,3 @@ unsafe fn compile_shader(kind: u32, src: &str) -> Result<u32, String> {
         Ok(shader)
     }
 }
-

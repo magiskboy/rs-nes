@@ -37,6 +37,7 @@ pub enum ItemKind {
     Volume,
     Fullscreen,
     DebugInfo,
+    VideoFilter,
     Player1,
     Player2,
     MapDevice,
@@ -78,6 +79,9 @@ impl ItemKind {
                 "Debug info    {}",
                 if ctx.settings.debug_info { "On" } else { "Off" }
             ),
+            ItemKind::VideoFilter => {
+                format!("Filter        {}", ctx.settings.video_filter.label())
+            }
             ItemKind::Player1 => {
                 let p1 = ctx.settings.devices.player1;
                 let status = ctx
@@ -124,6 +128,7 @@ const SETTINGS_ITEMS: &[ItemKind] = &[
     ItemKind::Volume,
     ItemKind::Fullscreen,
     ItemKind::DebugInfo,
+    ItemKind::VideoFilter,
     ItemKind::Goto(ScreenId::Controllers),
     ItemKind::Back,
 ];
@@ -185,25 +190,25 @@ pub fn hint_for(id: ScreenId, waiting_bind: bool, map_target: MapTarget) -> &'st
     }
 }
 
-/// Layout scale / title size tuned per screen (matches previous look).
-pub fn layout_scale(id: ScreenId, fb_w: i32, fb_h: i32) -> (f32, f32, f32) {
-    // (scale, title_mul, title_y_frac)
+/// Layout scale / title size tuned per screen.
+pub fn layout_scale(id: ScreenId, fb_w: i32, fb_h: i32) -> (f32, f32) {
+    // (scale, title_mul)
     match id {
         ScreenId::Pause => {
             let scale = ((fb_w.min(fb_h) as f32) / 320.0).clamp(2.0, 4.0);
-            (scale, 1.5, 0.28)
+            (scale, 1.5)
         }
         ScreenId::Settings => {
             let scale = ((fb_w.min(fb_h) as f32) / 320.0).clamp(2.0, 4.0);
-            (scale, 1.5, 0.20)
+            (scale, 1.5)
         }
         ScreenId::Controllers => {
             let scale = ((fb_w.min(fb_h) as f32) / 340.0).clamp(1.85, 3.75);
-            (scale, 1.4, 0.18)
+            (scale, 1.4)
         }
         ScreenId::ButtonMap => {
             let scale = ((fb_w.min(fb_h) as f32) / 360.0).clamp(1.75, 3.5);
-            (scale, 1.4, 0.08)
+            (scale, 1.4)
         }
     }
 }

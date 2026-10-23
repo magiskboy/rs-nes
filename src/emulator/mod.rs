@@ -259,7 +259,7 @@ fn run_windowed(nes: &mut Nes, rom_path: &Path) {
 
         let (fb_w, fb_h) = window.get_framebuffer_size();
         presenter.upload(nes.framebuffer());
-        presenter.draw(fb_w, fb_h);
+        presenter.draw(fb_w, fb_h, menu.settings.video_filter);
 
         overlay.begin(fb_w, fb_h);
         // Menu first (dim + items), then debug on top so HUD stays readable while paused.

@@ -234,6 +234,7 @@ impl Menu {
                 self.settings.debug_info = !self.settings.debug_info;
                 UiAction::ApplySettings
             }
+            Kind::VideoFilter => self.adjust_item(item, 1),
             Kind::Player1 | Kind::Player2 => self.adjust_item(item, 1),
             Kind::MapDevice => {
                 self.map_target = self.map_target.cycle(1);
@@ -273,6 +274,10 @@ impl Menu {
             Kind::DebugInfo => {
                 self.settings.debug_info = !self.settings.debug_info;
                 UiAction::ApplySettings
+            }
+            Kind::VideoFilter => {
+                self.settings.video_filter = self.settings.video_filter.cycle(dir);
+                UiAction::None
             }
             Kind::Player1 => {
                 self.settings.devices.player1 = self

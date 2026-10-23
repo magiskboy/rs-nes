@@ -1,12 +1,14 @@
 //! Emulator UI settings (volume, display, input maps).
 
 use crate::emulator::controller::{DeviceAssign, GamepadMap, KeyboardMap};
+use crate::emulator::video::VideoFilter;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub volume: f32,
     pub fullscreen: bool,
     pub debug_info: bool,
+    pub video_filter: VideoFilter,
     pub devices: DeviceAssign,
     pub keyboard: KeyboardMap,
     pub gamepad: GamepadMap,
@@ -18,6 +20,7 @@ impl Default for Settings {
             volume: 1.0,
             fullscreen: false,
             debug_info: false,
+            video_filter: VideoFilter::default(),
             devices: DeviceAssign::default(),
             keyboard: KeyboardMap::default(),
             gamepad: GamepadMap::default(),
