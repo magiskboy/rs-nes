@@ -6,13 +6,43 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct RomEntry {
     pub path: PathBuf,
+    /// ROM file stem (raw filename without extension).
     pub name: String,
+    /// Official title from `gamelist.txt` (if scanned).
+    pub title: Option<String>,
+    pub developer: Option<String>,
+    pub year: Option<String>,
+    /// Cover path relative to the ROM folder (`images/….png`).
+    pub cover_rel: Option<String>,
+}
+
+impl RomEntry {
+    pub fn from_path(path: PathBuf) -> Self {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("ROM")
+            .to_string();
+        Self {
+            path,
+            name,
+            title: None,
+            developer: None,
+            year: None,
+            cover_rel: None,
+        }
+    }
+
+    /// Label for the library list: prefer official title.
+    pub fn display_name(&self) -> &str {
+        self.title.as_deref().filter(|t| !t.is_empty()).unwrap_or(&self.name)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibRow {
     Rom(usize),
-    AddFolder,
+    SelectFolder,
 }
 
 pub fn scan_rom_dir(dir: &Path) -> Vec<RomEntry> {
@@ -33,14 +63,13 @@ pub fn scan_rom_dir(dir: &Path) -> Vec<RomEntry> {
         if !ext {
             continue;
         }
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("ROM")
-            .to_string();
-        out.push(RomEntry { path, name });
+        out.push(RomEntry::from_path(path));
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by(|a, b| {
+        a.display_name()
+            .to_lowercase()
+            .cmp(&b.display_name().to_lowercase())
+    });
     out
 }
 
@@ -63,15 +92,15 @@ impl LibRow {
         match self {
             LibRow::Rom(i) => roms
                 .get(i)
-                .map(|r| r.name.clone())
+                .map(|r| r.display_name().to_string())
                 .unwrap_or_else(|| "?".into()),
-            LibRow::AddFolder => "Add folder...".into(),
+            LibRow::SelectFolder => "Select folder...".into(),
         }
     }
 }
 
 pub fn build_rows(rom_count: usize) -> Vec<LibRow> {
     let mut rows: Vec<LibRow> = (0..rom_count).map(LibRow::Rom).collect();
-    rows.push(LibRow::AddFolder);
+    rows.push(LibRow::SelectFolder);
     rows
 }

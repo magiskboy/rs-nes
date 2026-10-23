@@ -10,16 +10,24 @@ use crate::cart::Mirroring;
 use crate::cart::Cartridge;
 use palette::{self as video};
 
-/// One evaluated sprite for the current scanline.
+/// Minimum A12-low duration (PPU dots) before a rising edge clocks MMC3.
+const A12_FILTER_DOTS: u16 = 16;
+
+/// One sprite slot for the current scanline (secondary OAM entry).
 #[derive(Clone, Copy, Default)]
 struct SpriteSlot {
     x: u8,
     attr: u8,
+    tile: u8,
+    /// Row within the sprite (0..height-1) before vertical flip is applied.
+    row: u8,
     /// Pattern low / high for this row (already flipped horizontally if needed).
     pattern_lo: u8,
     pattern_hi: u8,
     /// True if this slot came from OAM sprite 0.
     is_sprite0: bool,
+    /// False = empty secondary-OAM slot; hardware still fetches tile `$FF`.
+    in_range: bool,
 }
 
 /// Picture Processing Unit (2C02 / 2C07) — registers, VRAM, rendering, VBlank/NMI.
@@ -79,6 +87,9 @@ pub struct Ppu {
     odd_frame: bool,
     /// Previous CHR address A12 — rising edge clocks MMC3 IRQ.
     last_chr_a12: bool,
+    /// PPU dots A12 has stayed low; MMC3 ignores rises until this reaches
+    /// [`A12_FILTER_DOTS`] (nesdev ≈ 10–16).
+    a12_low_cycles: u16,
 }
 
 impl Ppu {
@@ -121,6 +132,7 @@ impl Ppu {
             nmi_pending: false,
             odd_frame: false,
             last_chr_a12: false,
+            a12_low_cycles: 0,
         }
     }
 
@@ -385,15 +397,23 @@ impl Ppu {
         }
     }
 
-    /// CHR fetch that also tracks A12 rising edges for mapper IRQs (MMC3).
-    fn chr_fetch(&mut self, addr: u16, cart: &mut Option<Cartridge>) -> u8 {
+    /// Drive MMC3 A12 edge detection from a PPU bus address (CHR or nametable).
+    fn observe_ppu_a12(&mut self, addr: u16, cart: &mut Option<Cartridge>) {
         let a12 = addr & 0x1000 != 0;
-        if a12 && !self.last_chr_a12 {
+        if a12 && !self.last_chr_a12 && self.a12_low_cycles >= A12_FILTER_DOTS {
             if let Some(c) = cart.as_mut() {
                 c.on_ppu_a12_rise();
             }
         }
+        if a12 {
+            self.a12_low_cycles = 0;
+        }
         self.last_chr_a12 = a12;
+    }
+
+    /// CHR fetch that also tracks A12 rising edges for mapper IRQs (MMC3).
+    fn chr_fetch(&mut self, addr: u16, cart: &mut Option<Cartridge>) -> u8 {
+        self.observe_ppu_a12(addr, cart);
         cart.as_ref().map(|c| c.ppu_read(addr)).unwrap_or(0)
     }
 
@@ -463,7 +483,9 @@ impl Ppu {
 
     // ─── Sprites ────────────────────────────────────────────────────────────
 
-    fn evaluate_sprites_for_next_line(&mut self, cart: &mut Option<Cartridge>) {
+    /// OAM scan only — pattern bytes are fetched later in cycles 257–320 so
+    /// empty slots still produce CHR A12 edges for MMC3 (SMB3 status bar).
+    fn evaluate_sprites_for_next_line(&mut self) {
         self.next_sprites = [SpriteSlot::default(); 8];
         self.next_sprite_count = 0;
         let mut overflow = false;
@@ -485,16 +507,15 @@ impl Ppu {
             }
             let row = (diff - 1) as u8;
             if self.next_sprite_count < 8 {
-                let tile = self.oam[base + 1];
-                let attr = self.oam[base + 2];
-                let x = self.oam[base + 3];
-                let (lo, hi) = self.sprite_pattern_bytes(tile, attr, row, cart);
                 let slot = SpriteSlot {
-                    x,
-                    attr,
-                    pattern_lo: lo,
-                    pattern_hi: hi,
+                    x: self.oam[base + 3],
+                    attr: self.oam[base + 2],
+                    tile: self.oam[base + 1],
+                    row,
+                    pattern_lo: 0,
+                    pattern_hi: 0,
                     is_sprite0: i == 0,
+                    in_range: true,
                 };
                 self.next_sprites[self.next_sprite_count as usize] = slot;
                 self.next_sprite_count += 1;
@@ -507,17 +528,17 @@ impl Ppu {
         }
     }
 
-    fn sprite_pattern_bytes(
-        &mut self,
-        tile: u8,
-        attr: u8,
-        mut row: u8,
-        cart: &mut Option<Cartridge>,
-    ) -> (u8, u8) {
-        let flip_v = attr & 0x80 != 0;
-        let flip_h = attr & 0x40 != 0;
+    /// Pattern-table addresses for one secondary-OAM slot (lo, hi plane).
+    fn sprite_pattern_addrs(&self, slot: &SpriteSlot) -> (u16, u16) {
         let height = self.sprite_height() as u8;
-        if flip_v {
+        let (tile, mut row, attr) = if slot.in_range {
+            (slot.tile, slot.row, slot.attr)
+        } else {
+            // Hardware leaves cleared secondary OAM as $FF and still fetches it.
+            (0xFF, 0, 0)
+        };
+
+        if attr & 0x80 != 0 {
             row = height - 1 - row;
         }
 
@@ -536,13 +557,43 @@ impl Ppu {
         };
 
         let addr = table_base | ((tile_index as u16) << 4) | fine_row as u16;
-        let mut lo = self.chr_fetch(addr, cart);
-        let mut hi = self.chr_fetch(addr + 8, cart);
-        if flip_h {
-            lo = lo.reverse_bits();
-            hi = hi.reverse_bits();
+        (addr, addr | 8)
+    }
+
+    /// Cycles 257–320: 8 sprites × 8 dots (garbage NT + pattern lo/hi).
+    fn fetch_sprite_slot(&mut self, cart: &mut Option<Cartridge>) {
+        if !(257..=320).contains(&self.cycle) {
+            return;
         }
-        (lo, hi)
+        let rel = self.cycle - 257;
+        let slot_idx = (rel / 8) as usize;
+        let phase = rel % 8;
+        let slot = self.sprites[slot_idx];
+
+        match phase {
+            // Garbage nametable fetches — pull A12 low between pattern fetches.
+            1 | 3 => {
+                let addr = 0x2000 | (self.v & 0x0FFF);
+                self.observe_ppu_a12(addr, cart);
+            }
+            5 => {
+                let (lo_addr, _) = self.sprite_pattern_addrs(&slot);
+                let mut lo = self.chr_fetch(lo_addr, cart);
+                if slot.in_range && slot.attr & 0x40 != 0 {
+                    lo = lo.reverse_bits();
+                }
+                self.sprites[slot_idx].pattern_lo = lo;
+            }
+            7 => {
+                let (_, hi_addr) = self.sprite_pattern_addrs(&slot);
+                let mut hi = self.chr_fetch(hi_addr, cart);
+                if slot.in_range && slot.attr & 0x40 != 0 {
+                    hi = hi.reverse_bits();
+                }
+                self.sprites[slot_idx].pattern_hi = hi;
+            }
+            _ => {}
+        }
     }
 
     fn sprite_pixel_at(&self, x: u16) -> (u8, u8, bool, bool) {
@@ -693,7 +744,7 @@ impl Ppu {
                 self.increment_y();
             }
 
-            // Copy horizontal scroll; activate next-line sprites.
+            // Copy horizontal scroll; activate next-line sprites (patterns filled below).
             if self.cycle == 257 {
                 self.copy_x();
                 self.sprites = self.next_sprites;
@@ -707,14 +758,24 @@ impl Ppu {
             }
 
             // Evaluate sprites for the *next* scanline near end of line.
-            // (Simplified: full OAM scan once at cycle 256.)
+            // (Simplified: full OAM scan once at cycle 256; CHR fetch is 257–320.)
             if self.cycle == 256 && self.scanline < last_visible {
-                self.evaluate_sprites_for_next_line(cart);
+                self.evaluate_sprites_for_next_line();
             }
             // Pre-render prepares sprites for scanline 0.
             if self.cycle == 256 && self.scanline == prerender_sl {
-                self.evaluate_sprites_for_next_line(cart);
+                self.evaluate_sprites_for_next_line();
             }
+
+            // Sprite pattern fetches (all 8 slots, including empty → tile $FF).
+            if self.cycle >= 257 && self.cycle <= 320 {
+                self.fetch_sprite_slot(cart);
+            }
+        }
+
+        // MMC3 A12 filter: count consecutive dots with A12 low.
+        if !self.last_chr_a12 {
+            self.a12_low_cycles = self.a12_low_cycles.saturating_add(1);
         }
 
         // VBlank set
@@ -933,9 +994,12 @@ mod tests {
         ppu.sprites[0] = SpriteSlot {
             x: 0,
             attr: 0,
+            tile: 0,
+            row: 0,
             pattern_lo: 0x80,
             pattern_hi: 0x80,
             is_sprite0: true,
+            in_range: true,
         };
         ppu.sprite_count = 1;
         ppu.bg_shift_lo = 0x8000;
@@ -945,5 +1009,41 @@ mod tests {
         ppu.render_pixel();
         assert!(ppu.status & 0x40 != 0, "sprite 0 hit expected");
         let _ = cart;
+    }
+
+    /// Empty secondary-OAM slots must still CHR-fetch (tile `$FF`) so MMC3
+    /// gets one A12 clock per scanline — required for SMB3's status bar split.
+    #[test]
+    fn dummy_sprite_fetches_clock_mmc3_a12() {
+        use crate::cart::Loader;
+
+        let mut bytes = vec![0u8; 16 + 0x8000 + 0x2000];
+        bytes[0..4].copy_from_slice(b"NES\x1a");
+        bytes[4] = 2; // 32 KiB PRG
+        bytes[5] = 1; // 8 KiB CHR
+        bytes[6] = 0x40; // mapper 4
+        let rom = Loader::parse(&bytes).unwrap();
+        let mut cart = Some(Cartridge::from_rom(rom).unwrap());
+        cart.as_mut().unwrap().cpu_write(0xC000, 0); // latch = 0 → IRQ every clock
+        cart.as_mut().unwrap().cpu_write(0xC001, 0); // reload
+        cart.as_mut().unwrap().cpu_write(0xE001, 0); // enable
+
+        let mut ppu = Ppu::new();
+        ppu.ctrl = 0x08; // sprite pattern table $1000
+        ppu.a12_low_cycles = A12_FILTER_DOTS;
+        ppu.sprites = [SpriteSlot::default(); 8]; // all empty → fetch $FF
+        ppu.sprite_count = 0;
+
+        for cycle in 257..=320 {
+            ppu.cycle = cycle;
+            ppu.fetch_sprite_slot(&mut cart);
+            if !ppu.last_chr_a12 {
+                ppu.a12_low_cycles = ppu.a12_low_cycles.saturating_add(1);
+            }
+        }
+        assert!(
+            cart.as_ref().unwrap().irq_pending(),
+            "expected MMC3 IRQ from dummy sprite pattern fetches"
+        );
     }
 }

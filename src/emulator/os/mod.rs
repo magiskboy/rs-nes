@@ -1,7 +1,9 @@
 //! NES OS shell — boot splash, game library, settings (OpenGL overlay UI).
 
 mod boot;
+mod cover;
 mod draw;
+mod gamelist;
 mod library;
 mod nav;
 mod theme;
@@ -10,6 +12,7 @@ use crate::emulator::audio::UiSfx;
 use crate::emulator::config;
 use crate::emulator::menu::input::NavAction;
 use crate::emulator::menu::{Menu, UiAction};
+use crate::emulator::os::cover::{load_cover_rgba, CoverRgba, CoverService};
 use crate::emulator::os::library::{
     build_rows, default_rom_dirs, scan_rom_dir, LibRow, RomEntry,
 };
@@ -54,14 +57,24 @@ pub struct Os {
     rows: Vec<LibRow>,
     sel: usize,
     scroll: usize,
+    /// How many library rows fit on screen (updated each draw from framebuffer size).
+    lib_visible: usize,
     blink_ticks: u32,
     sys_sel: usize,
     /// Previous P1 pad bitmask for edge detection in the shell / pause UI.
     prev_pad: u8,
-    /// Extra folders chosen via “Add folder…” (scanned on every refresh).
+    /// Library folders (from “Select folder…” / `--roms`). When non-empty these
+    /// replace the default `roms/` scan paths.
     extra_dirs: Vec<PathBuf>,
     /// Extra single ROM paths (e.g. CLI arg).
     extra_roms: Vec<PathBuf>,
+    covers: CoverService,
+    /// RGBA pixels for the currently selected ROM cover (if any).
+    selected_cover: Option<CoverRgba>,
+    /// ROM path the cached cover belongs to.
+    selected_cover_rom: Option<PathBuf>,
+    /// Last `CoverService::generation` applied to `selected_cover`.
+    cover_gen: u64,
 }
 
 /// Result of handling input while in the shell or pause overlay.
@@ -77,6 +90,8 @@ pub enum OsAction {
     Screenshot,
     ExitToLibrary,
     PickFolder,
+    /// Kick off (or no-op) a background cover download job.
+    ScanCovers,
 }
 
 impl Os {
@@ -90,13 +105,19 @@ impl Os {
             rows: Vec::new(),
             sel: 0,
             scroll: 0,
+            lib_visible: 12,
             blink_ticks: 0,
             sys_sel: 0,
             prev_pad: 0,
             extra_dirs: loaded.extra_dirs,
             extra_roms: Vec::new(),
+            covers: CoverService::new(),
+            selected_cover: None,
+            selected_cover_rom: None,
+            cover_gen: 0,
         };
         os.refresh_library();
+        os.reload_selected_cover();
         os
     }
 
@@ -122,9 +143,12 @@ impl Os {
     pub fn refresh_library(&mut self) {
         let mut seen = std::collections::HashSet::new();
         let mut roms = Vec::new();
-        let dirs = default_rom_dirs()
-            .into_iter()
-            .chain(self.extra_dirs.iter().cloned());
+        // Selected / CLI folders replace the default `roms/` locations.
+        let dirs: Vec<PathBuf> = if self.extra_dirs.is_empty() {
+            default_rom_dirs()
+        } else {
+            self.extra_dirs.clone()
+        };
         for dir in dirs {
             for entry in scan_rom_dir(&dir) {
                 let key = entry.path.to_string_lossy().to_lowercase();
@@ -139,24 +163,22 @@ impl Os {
             }
             let key = path.to_string_lossy().to_lowercase();
             if seen.insert(key) {
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("ROM")
-                    .to_string();
-                roms.push(RomEntry {
-                    path: path.clone(),
-                    name,
-                });
+                roms.push(RomEntry::from_path(path.clone()));
             }
         }
-        roms.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        gamelist::apply_to_roms(&mut roms);
+        roms.sort_by(|a, b| {
+            a.display_name()
+                .to_lowercase()
+                .cmp(&b.display_name().to_lowercase())
+        });
         self.roms = roms;
         self.rows = build_rows(self.roms.len());
         if self.sel >= self.rows.len() && !self.rows.is_empty() {
             self.sel = self.rows.len() - 1;
         }
-        self.ensure_scroll_visible(12);
+        self.ensure_scroll_visible(self.lib_visible);
+        self.reload_selected_cover();
     }
 
     /// Add a folder of `.nes` files to the library (or a single ROM path from the CLI).
@@ -172,6 +194,23 @@ impl Os {
         }
     }
 
+    /// Replace the library with a single folder (NES OS “Select folder…”).
+    pub fn set_folder(&mut self, dir: PathBuf) {
+        if !dir.is_dir() {
+            return;
+        }
+        self.extra_dirs = vec![dir.clone()];
+        self.extra_roms.clear();
+        self.sel = 0;
+        self.scroll = 0;
+        self.refresh_library();
+        if let Some(entry) = self.roms.iter().find(|r| r.path.starts_with(&dir)) {
+            let path = entry.path.clone();
+            self.select_rom_path(&path);
+        }
+    }
+
+    /// Append a ROM folder (CLI `--roms`, repeatable).
     pub fn add_folder(&mut self, dir: PathBuf) {
         if !dir.is_dir() {
             return;
@@ -190,7 +229,8 @@ impl Os {
         if let Some(i) = self.roms.iter().position(|r| r.path == path) {
             if let Some(row_i) = self.rows.iter().position(|r| *r == LibRow::Rom(i)) {
                 self.sel = row_i;
-                self.ensure_scroll_visible(12);
+                self.ensure_scroll_visible(self.lib_visible);
+                self.reload_selected_cover();
             }
         }
     }
@@ -234,6 +274,54 @@ impl Os {
         self.blink_ticks = self.blink_ticks.wrapping_add(1);
     }
 
+    /// Poll cover-scan worker and refresh settings label / selected cover.
+    pub fn tick_covers(&mut self) {
+        let before = self.covers.generation;
+        self.covers.poll();
+        self.menu.scan_covers_label = self.covers.status().label();
+        if self.covers.generation != before {
+            // Reload titles/devs/years written to gamelist.txt by the worker.
+            // Keep ROM order (and LibRow indices) stable while browsing.
+            gamelist::apply_to_roms(&mut self.roms);
+            self.reload_selected_cover();
+        } else if self.covers.generation != self.cover_gen {
+            self.reload_selected_cover();
+        }
+    }
+
+    fn reload_selected_cover(&mut self) {
+        self.cover_gen = self.covers.generation;
+        let rom = self.rows.get(self.sel).and_then(|row| match row {
+            LibRow::Rom(i) => self.roms.get(*i),
+            LibRow::SelectFolder => None,
+        });
+        match rom {
+            Some(entry) => {
+                self.selected_cover_rom = Some(entry.path.clone());
+                self.selected_cover = gamelist::resolve_cover_path(entry).and_then(|p| {
+                    load_cover_rgba(&p)
+                });
+            }
+            None => {
+                self.selected_cover = None;
+                self.selected_cover_rom = None;
+            }
+        }
+    }
+
+    /// Metadata for the currently selected library ROM, if any.
+    pub fn selected_meta(&self) -> Option<&RomEntry> {
+        self.rows.get(self.sel).and_then(|row| match row {
+            LibRow::Rom(i) => self.roms.get(*i),
+            LibRow::SelectFolder => None,
+        })
+    }
+
+    pub fn start_cover_scan(&mut self) {
+        let _ = self.covers.start_scan(&self.roms);
+        self.menu.scan_covers_label = self.covers.status().label();
+    }
+
     fn blink_on(&self) -> bool {
         (self.blink_ticks / 16) % 2 == 0
     }
@@ -262,6 +350,7 @@ impl Os {
             UiAction::None => OsAction::None,
             UiAction::ApplySettings => OsAction::ApplySettings,
             UiAction::Quit => OsAction::Quit,
+            UiAction::ScanCovers => OsAction::ScanCovers,
             UiAction::ResetGame | UiAction::Screenshot | UiAction::ExitToLibrary => {
                 OsAction::None
             }
@@ -355,6 +444,7 @@ impl Os {
                         UiAction::ResetGame => OsAction::ResetGame,
                         UiAction::Screenshot => OsAction::Screenshot,
                         UiAction::ExitToLibrary => OsAction::ExitToLibrary,
+                        UiAction::ScanCovers => OsAction::None,
                     };
                     (action, None)
                 } else {
@@ -371,12 +461,14 @@ impl Os {
         match nav_act {
             NavAction::Up => {
                 self.sel = self.sel.checked_sub(1).unwrap_or(self.rows.len() - 1);
-                self.ensure_scroll_visible(12);
+                self.ensure_scroll_visible(self.lib_visible);
+                self.reload_selected_cover();
                 (OsAction::None, Some(UiSfx::Move))
             }
             NavAction::Down => {
                 self.sel = (self.sel + 1) % self.rows.len();
-                self.ensure_scroll_visible(12);
+                self.ensure_scroll_visible(self.lib_visible);
+                self.reload_selected_cover();
                 (OsAction::None, Some(UiSfx::Move))
             }
             NavAction::Confirm => {
@@ -427,7 +519,7 @@ impl Os {
                     OsAction::None
                 }
             }
-            Some(LibRow::AddFolder) => OsAction::PickFolder,
+            Some(LibRow::SelectFolder) => OsAction::PickFolder,
             None => OsAction::None,
         }
     }
@@ -465,6 +557,7 @@ impl Os {
             UiAction::ApplySettings => OsAction::ApplySettings,
             UiAction::Quit => OsAction::Quit,
             UiAction::ResetGame | UiAction::Screenshot => OsAction::None,
+            UiAction::ScanCovers => OsAction::ScanCovers,
             UiAction::ExitToLibrary => {
                 self.menu.close_all();
                 self.mode = Mode::Library;
@@ -485,11 +578,27 @@ impl Os {
         } else if self.sel >= self.scroll + visible {
             self.scroll = self.sel + 1 - visible;
         }
+        // Keep the window packed to the bottom so tall screens stay full.
+        let max_scroll = self.rows.len().saturating_sub(visible);
+        if self.scroll > max_scroll {
+            self.scroll = max_scroll;
+        }
     }
 
-    pub fn draw(&self, overlay: &mut Overlay, glfw: &Glfw, fb_w: i32, fb_h: i32) {
+    pub fn draw(&mut self, overlay: &mut Overlay, glfw: &Glfw, fb_w: i32, fb_h: i32) {
+        self.lib_visible = draw::library_visible_rows(fb_w, fb_h);
+        self.ensure_scroll_visible(self.lib_visible);
+
         let blink = self.blink_on();
         let clock = draw::format_clock();
+        let scan_hint = match self.covers.status() {
+            cover::ScanStatus::Running { done, total } => {
+                Some(format!("Scanning library {done}/{total}..."))
+            }
+            _ => None,
+        };
+        let scan_hint_ref = scan_hint.as_deref();
+        let selected = self.selected_meta();
         match self.mode {
             Mode::Boot => boot::draw(overlay, fb_w, fb_h, self.boot_ticks),
             Mode::Library => {
@@ -503,6 +612,9 @@ impl Os {
                     self.scroll,
                     blink,
                     &clock,
+                    self.selected_cover.as_ref(),
+                    selected,
+                    scan_hint_ref,
                 );
             }
             Mode::SystemMenu => {
@@ -516,6 +628,9 @@ impl Os {
                     self.scroll,
                     blink,
                     &clock,
+                    self.selected_cover.as_ref(),
+                    selected,
+                    scan_hint_ref,
                 );
                 let labels: Vec<&str> = SysItem::ALL.iter().map(|i| i.label()).collect();
                 draw::draw_system_menu(overlay, fb_w, fb_h, self.sys_sel, blink, &labels);

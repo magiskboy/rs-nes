@@ -33,6 +33,8 @@ pub enum UiAction {
     Screenshot,
     /// Leave the current game and return to NES OS library.
     ExitToLibrary,
+    /// Start a background cover-art scan for the ROM library.
+    ScanCovers,
 }
 
 pub struct Menu {
@@ -45,6 +47,8 @@ pub struct Menu {
     waiting_bind: Option<NesPadButton>,
     capture_baseline_ready: bool,
     capture_ignore: Vec<GamepadButton>,
+    /// Label shown for Settings → Scan library (updated by NES OS).
+    pub scan_covers_label: String,
 }
 
 impl Menu {
@@ -61,6 +65,7 @@ impl Menu {
             waiting_bind: None,
             capture_baseline_ready: false,
             capture_ignore: Vec::new(),
+            scan_covers_label: "Scan library".into(),
         }
     }
 
@@ -293,6 +298,7 @@ impl Menu {
                 }
                 UiAction::ApplySettings
             }
+            Kind::ScanCovers => UiAction::ScanCovers,
         }
     }
 

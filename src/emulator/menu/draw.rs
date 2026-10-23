@@ -35,6 +35,7 @@ pub fn draw_menu(
         map_target: menu.map_target(),
         waiting_bind: menu.waiting_bind(),
         glfw: Some(glfw),
+        scan_covers_label: &menu.scan_covers_label,
     };
 
     let labels: Vec<String> = def.items.iter().map(|item| item.label(&ctx)).collect();

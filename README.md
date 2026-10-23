@@ -10,12 +10,14 @@ Run NES games on a modern desktop through a small “NES OS” shell: boot splas
 
 ### NES OS
 - Boot splash → **Game Library** (scans `roms/` for `.nes` files)
+- Cover art panel on the right shows box art plus title, developer, and year; images live in each library folder’s `images/` (e.g. `roms/images/`)
+- Settings → **Scan library** looks up each ROM in the Libretro game database (official name, developer, year), downloads missing covers, and writes `gamelist.txt` next to the ROMs
 - Top bar shows date/time; video **Filter** applies to the OS shell as well as games
 - Shell input uses only NES buttons: **D-pad**, **A**, **B**, **Select**, **Start**
   - **Start** / **A** — confirm
   - **Select** — system menu (Settings / Quit)
   - **B** — back
-- Add a folder of ROMs via “Add folder…” in the library (or a CLI path / folder)
+- “Select folder…” sets the library to that folder only (replaces the previous one; default `roms/` is used until you pick one)
 - In-game: **Select** (or `P`) → pause (**Resume** / **Reset game** / **Screenshot** / **Exit to OS**)
 
 ### Play
@@ -79,7 +81,7 @@ Artifacts land in `dist/`.
 
 ## Config file
 
-Settings (volume, filter, fullscreen, debug HUD, controllers, button maps) and folders added via **Add folder…** are saved automatically to:
+Settings (volume, filter, fullscreen, debug HUD, controllers, button maps) and folders chosen via **Select folder…** are saved automatically to:
 
 | OS | Path |
 |----|------|

@@ -27,6 +27,10 @@ pub struct Overlay {
     vbo: u32,
     font_tex: u32,
     logo_tex: u32,
+    /// Mutable RGBA slot for library cover art (uploaded on demand).
+    cover_tex: u32,
+    cover_w: u32,
+    cover_h: u32,
     u_mode: i32,
     /// Interleaved: x y u v r g b a
     verts: Vec<f32>,
@@ -66,6 +70,7 @@ impl Overlay {
 
             let font_tex = build_font_texture()?;
             let logo_tex = build_logo_texture()?;
+            let cover_tex = build_empty_rgba_texture()?;
             let u_mode = gl::GetUniformLocation(program, c"uMode".as_ptr());
 
             Ok(Self {
@@ -74,6 +79,9 @@ impl Overlay {
                 vbo,
                 font_tex,
                 logo_tex,
+                cover_tex,
+                cover_w: 1,
+                cover_h: 1,
                 u_mode,
                 verts: Vec::with_capacity(1024),
                 fb_w: 1.0,
@@ -89,6 +97,58 @@ impl Overlay {
 
     /// Draw the baked Nitendo logo (RGBA texture), flushing any pending quads first.
     pub fn draw_logo(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.draw_rgba_tex(self.logo_tex, x, y, w, h);
+    }
+
+    /// Upload RGBA8 pixels into the cover texture slot (replaces previous cover).
+    pub fn set_cover_rgba(&mut self, width: u32, height: u32, pixels: &[u8]) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let expected = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+        if pixels.len() < expected {
+            return;
+        }
+        unsafe {
+            gl::BindTexture(gl::TEXTURE_2D, self.cover_tex);
+            gl::PixelStorei(gl::UNPACK_ALIGNMENT, 4);
+            if width == self.cover_w && height == self.cover_h {
+                gl::TexSubImage2D(
+                    gl::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    pixels.as_ptr() as *const _,
+                );
+            } else {
+                gl::TexImage2D(
+                    gl::TEXTURE_2D,
+                    0,
+                    gl::RGBA as i32,
+                    width as i32,
+                    height as i32,
+                    0,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    pixels.as_ptr() as *const _,
+                );
+                self.cover_w = width;
+                self.cover_h = height;
+            }
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+        }
+    }
+
+    /// Draw the current cover texture.
+    pub fn draw_cover(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.draw_rgba_tex(self.cover_tex, x, y, w, h);
+    }
+
+    fn draw_rgba_tex(&mut self, tex: u32, x: f32, y: f32, w: f32, h: f32) {
         self.flush();
         let rgba = [1.0, 1.0, 1.0, 1.0];
         let mut verts = Vec::with_capacity(FLOATS_PER_QUAD);
@@ -119,7 +179,7 @@ impl Overlay {
             gl::Uniform1i(self.u_mode, MODE_RGBA);
 
             gl::ActiveTexture(gl::TEXTURE0);
-            gl::BindTexture(gl::TEXTURE_2D, self.logo_tex);
+            gl::BindTexture(gl::TEXTURE_2D, tex);
             let tloc = gl::GetUniformLocation(self.program, c"uFont".as_ptr());
             gl::Uniform1i(tloc, 0);
 
@@ -259,7 +319,34 @@ impl Drop for Overlay {
             gl::DeleteBuffers(1, &self.vbo);
             gl::DeleteTextures(1, &self.font_tex);
             gl::DeleteTextures(1, &self.logo_tex);
+            gl::DeleteTextures(1, &self.cover_tex);
         }
+    }
+}
+
+unsafe fn build_empty_rgba_texture() -> Result<u32, String> {
+    unsafe {
+        let mut tex = 0;
+        gl::GenTextures(1, &mut tex);
+        gl::BindTexture(gl::TEXTURE_2D, tex);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+        let pixel = [0u8, 0, 0, 0];
+        gl::PixelStorei(gl::UNPACK_ALIGNMENT, 4);
+        gl::TexImage2D(
+            gl::TEXTURE_2D,
+            0,
+            gl::RGBA as i32,
+            1,
+            1,
+            0,
+            gl::RGBA,
+            gl::UNSIGNED_BYTE,
+            pixel.as_ptr() as *const _,
+        );
+        Ok(tex)
     }
 }
 

@@ -19,7 +19,7 @@ use crate::emulator::os::{Os, OsAction};
 use crate::emulator::overlay::Overlay;
 use crate::emulator::video::GlPresenter;
 use crate::nes::Nes;
-use glfw::{Action, Context, InitHint, Key, WindowEvent, WindowHint, WindowMode};
+use glfw::{Action, Context, CursorMode, InitHint, Key, WindowEvent, WindowHint, WindowMode};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -82,7 +82,7 @@ fn pick_rom_dialog() -> Option<PathBuf> {
 /// Native folder picker for adding a directory of `.nes` ROMs to the library.
 fn pick_folder_dialog() -> Option<PathBuf> {
     let path = rfd::FileDialog::new()
-        .set_title("Add game folder")
+        .set_title("Select game folder")
         .pick_folder();
     macos_activate_for_input();
     path
@@ -145,9 +145,15 @@ fn run_windowed(cli: Cli) {
     window.make_current();
     window.set_key_polling(true);
     window.set_focus_polling(true);
+    window.set_cursor_pos_polling(true);
     macos_activate_for_input();
     window.focus();
     glfw.set_swap_interval(glfw::SwapInterval::Sync(1));
+
+    // Auto-hide mouse: show on move, hide after idle.
+    const CURSOR_HIDE_AFTER: Duration = Duration::from_secs(2);
+    let mut cursor_visible = true;
+    let mut last_cursor_move = Instant::now();
 
     gl::load_with(|s| window.get_proc_address(s) as *const _);
     let mut presenter = GlPresenter::new().expect("GL presenter");
@@ -241,8 +247,20 @@ fn run_windowed(cli: Cli) {
                 WindowEvent::Focus(focused) => {
                     controllers.on_focus(focused);
                 }
+                WindowEvent::CursorPos(_, _) => {
+                    last_cursor_move = Instant::now();
+                    if !cursor_visible {
+                        window.set_cursor_mode(CursorMode::Normal);
+                        cursor_visible = true;
+                    }
+                }
                 _ => {}
             }
+        }
+
+        if cursor_visible && last_cursor_move.elapsed() >= CURSOR_HIDE_AFTER {
+            window.set_cursor_mode(CursorMode::Hidden);
+            cursor_visible = false;
         }
 
         if os.is_waiting_bind() {
@@ -263,6 +281,7 @@ fn run_windowed(cli: Cli) {
 
         os.tick_boot();
         os.tick_blink();
+        os.tick_covers();
 
         let pads = controllers.poll(
             &glfw,
@@ -440,11 +459,14 @@ fn handle_os_action(
         }
         OsAction::PickFolder => {
             if let Some(path) = pick_folder_dialog() {
-                os.add_folder(path);
+                os.set_folder(path);
                 os.save_config();
             }
             macos_activate_for_input();
             window.focus();
+        }
+        OsAction::ScanCovers => {
+            os.start_cover_scan();
         }
     }
 }

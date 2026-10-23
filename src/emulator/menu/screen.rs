@@ -41,6 +41,8 @@ pub enum ItemKind {
     Fullscreen,
     DebugInfo,
     VideoFilter,
+    /// Background job: fetch missing boxarts into each library `images/` folder.
+    ScanCovers,
     Player1,
     Player2,
     MapDevice,
@@ -58,6 +60,8 @@ pub struct LabelCtx<'a> {
     pub map_target: MapTarget,
     pub waiting_bind: Option<NesPadButton>,
     pub glfw: Option<&'a Glfw>,
+    /// Dynamic label for [`ItemKind::ScanCovers`] (progress text from OS).
+    pub scan_covers_label: &'a str,
 }
 
 impl ItemKind {
@@ -88,6 +92,7 @@ impl ItemKind {
             ItemKind::VideoFilter => {
                 format!("Filter        {}", ctx.settings.video_filter.label())
             }
+            ItemKind::ScanCovers => ctx.scan_covers_label.to_string(),
             ItemKind::Player1 => {
                 let p1 = ctx.settings.devices.player1;
                 let status = ctx
@@ -136,6 +141,7 @@ const SETTINGS_ITEMS: &[ItemKind] = &[
     ItemKind::Fullscreen,
     ItemKind::DebugInfo,
     ItemKind::VideoFilter,
+    ItemKind::ScanCovers,
     ItemKind::Goto(ScreenId::Controllers),
     ItemKind::Back,
 ];
