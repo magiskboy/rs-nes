@@ -478,13 +478,11 @@ fn run_windowed(cli: Cli) {
             fps_timer = Instant::now();
         }
 
-        let now = Instant::now();
-        if now < next_frame {
-            thread::sleep(next_frame - now);
-            next_frame += frame_period;
-        } else {
-            next_frame = now + frame_period;
-        }
+        // VSync already blocked in `swap_buffers`. The software clock only
+        // sleeps when we are still ahead (common on Linux when the compositor
+        // ignores swap interval). Never reset to `now + period` on a small
+        // overrun — that stacks with the next VSync wait and feels like lag.
+        wait_for_frame(&mut next_frame, frame_period);
     }
 
     // Window closed via title-bar / Quit — persist battery before drop.
@@ -756,4 +754,35 @@ fn frame_duration(region: Region) -> Duration {
         ),
     };
     Duration::from_nanos(1_000_000_000u64.saturating_mul(den) / num)
+}
+
+/// Pace one host frame to the NES frame clock.
+///
+/// With VSync on, `swap_buffers` is the primary limiter; this path mostly
+/// no-ops. When ahead, sleep then spin the last millisecond — Linux timer
+/// slack makes a full `thread::sleep(rem)` overshoot and stutter. When behind,
+/// keep the phase (`+= period`) instead of snapping to wall time so a late
+/// frame does not force an extra sleep after the next VSync.
+fn wait_for_frame(next_frame: &mut Instant, frame_period: Duration) {
+    let now = Instant::now();
+    if now < *next_frame {
+        let rem = *next_frame - now;
+        const SPIN: Duration = Duration::from_millis(1);
+        if rem > SPIN {
+            thread::sleep(rem - SPIN);
+        }
+        while Instant::now() < *next_frame {
+            std::hint::spin_loop();
+        }
+        *next_frame += frame_period;
+    } else {
+        let behind = now.duration_since(*next_frame);
+        // Big hitch (alt-tab, compositor stall): resync so we do not try to
+        // catch up by running frames back-to-back.
+        if behind > frame_period.saturating_mul(3) {
+            *next_frame = now + frame_period;
+        } else {
+            *next_frame += frame_period;
+        }
+    }
 }
