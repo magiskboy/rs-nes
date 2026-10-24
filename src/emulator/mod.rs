@@ -226,6 +226,11 @@ fn run_headless(nes: &mut Nes) {
 }
 
 fn run_windowed(cli: Cli) {
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "warning: debug build — frame pacing will be slow; use `cargo run --release` / a release binary"
+    );
+
     glfw::init_hint(InitHint::CocoaChdirResources(false));
     glfw::init_hint(InitHint::CocoaMenubar(true));
 
@@ -764,21 +769,28 @@ fn frame_duration(region: Region) -> Duration {
 
 /// Pace one host frame to the NES frame clock (~60.1 Hz NTSC / 50 Hz PAL).
 ///
-/// Sleeps the coarse remainder then spins — Linux timer slack often overshoots
-/// a full `sleep(rem)` by several ms and lands at ~50 FPS. On overrun, keep
-/// phase (`+= period`) instead of snapping to wall time.
+/// Linux: never `sleep` for the full remainder — coarse timers (≈10 ms) turn a
+/// 12 ms sleep into 20 ms and lock the loop at ~50 FPS. Sleep 1 ms at a time,
+/// then spin for the last 2 ms. Elsewhere: one coarse sleep + short spin.
+/// On overrun, keep phase (`+= period`) instead of snapping to wall time.
 fn wait_for_frame(next_frame: &mut Instant, frame_period: Duration) {
     let now = Instant::now();
     if now < *next_frame {
-        let rem = *next_frame - now;
-        // Leave enough slack that a late wake still lands before the deadline.
-        // Linux timer slack is often 1–4 ms; a short spin window undershoots to ~50 FPS.
         #[cfg(target_os = "linux")]
-        const SPIN: Duration = Duration::from_millis(4);
+        {
+            const SPIN: Duration = Duration::from_millis(2);
+            const SLICE: Duration = Duration::from_millis(1);
+            while Instant::now() + SPIN < *next_frame {
+                thread::sleep(SLICE);
+            }
+        }
         #[cfg(not(target_os = "linux"))]
-        const SPIN: Duration = Duration::from_millis(2);
-        if rem > SPIN {
-            thread::sleep(rem - SPIN);
+        {
+            const SPIN: Duration = Duration::from_millis(2);
+            let rem = *next_frame - Instant::now();
+            if rem > SPIN {
+                thread::sleep(rem - SPIN);
+            }
         }
         while Instant::now() < *next_frame {
             std::hint::spin_loop();
