@@ -4,4 +4,4 @@ mod loader;
 pub mod mapper;
 
 pub use loader::{Loader, Mirroring, NesHeader, Rom};
-pub use mapper::{mapper_supported, Cartridge};
+pub use mapper::{mapper_supported, Cartridge, NtSource};

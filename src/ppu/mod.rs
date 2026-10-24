@@ -6,8 +6,7 @@ pub use palette::{
 };
 
 use crate::clock::Region;
-use crate::cart::Mirroring;
-use crate::cart::Cartridge;
+use crate::cart::{Cartridge, Mirroring, NtSource};
 use palette::{self as video};
 
 /// Minimum A12-low duration (PPU dots) before a rising edge clocks MMC3.
@@ -191,8 +190,16 @@ impl Ppu {
                 if was_off && self.nmi_enabled() && self.status & 0x80 != 0 {
                     self.nmi_pending = true;
                 }
+                if let Some(c) = cart.as_mut() {
+                    c.notify_ppu_reg(0, value);
+                }
             }
-            1 => self.mask = value,
+            1 => {
+                self.mask = value;
+                if let Some(c) = cart.as_mut() {
+                    c.notify_ppu_reg(1, value);
+                }
+            }
             2 => {}
             3 => self.oam_addr = value,
             4 => {
@@ -245,15 +252,11 @@ impl Ppu {
     fn read_ppu_memory(&mut self, addr: u16, cart: &mut Option<Cartridge>) -> u8 {
         let addr = addr & 0x3FFF;
         match addr {
-            0x0000..=0x1FFF => cart.as_mut().map(|c| c.ppu_read(addr)).unwrap_or(0),
-            0x2000..=0x3EFF => {
-                let mirroring = cart
-                    .as_ref()
-                    .map(|c| c.mirroring())
-                    .unwrap_or(Mirroring::Horizontal);
-                let index = Self::map_nametable_index(addr, mirroring);
-                self.nametables[index]
-            }
+            0x0000..=0x1FFF => cart
+                .as_ref()
+                .map(|c| c.ppu_read(addr, false))
+                .unwrap_or(0),
+            0x2000..=0x3EFF => self.read_nametable(addr, cart),
             0x3F00..=0x3FFF => self.read_palette(addr),
             _ => 0,
         }
@@ -267,17 +270,49 @@ impl Ppu {
                     c.ppu_write(addr, value);
                 }
             }
-            0x2000..=0x3EFF => {
-                let mirroring = cart
-                    .as_ref()
-                    .map(|c| c.mirroring())
-                    .unwrap_or(Mirroring::Horizontal);
-                let index = Self::map_nametable_index(addr, mirroring);
-                self.nametables[index] = value;
-            }
+            0x2000..=0x3EFF => self.write_nametable(addr, value, cart),
             0x3F00..=0x3FFF => self.write_palette(addr, value),
             _ => {}
         }
+    }
+
+    fn read_nametable(&mut self, addr: u16, cart: &mut Option<Cartridge>) -> u8 {
+        let custom = cart.as_ref().is_some_and(|c| c.uses_custom_nametable());
+        if custom {
+            let source = cart.as_mut().unwrap().nametable_source(addr);
+            return match source {
+                Some(NtSource::Ciram(off)) => self.nametables[off as usize & 0xFFF],
+                Some(NtSource::Mapper) => cart.as_ref().unwrap().nt_read(addr),
+                None => 0,
+            };
+        }
+        let mirroring = cart
+            .as_ref()
+            .map(|c| c.mirroring())
+            .unwrap_or(Mirroring::Horizontal);
+        let index = Self::map_nametable_index(addr, mirroring);
+        self.nametables[index]
+    }
+
+    fn write_nametable(&mut self, addr: u16, value: u8, cart: &mut Option<Cartridge>) {
+        let custom = cart.as_ref().is_some_and(|c| c.uses_custom_nametable());
+        if custom {
+            let source = cart.as_mut().unwrap().nametable_source(addr);
+            match source {
+                Some(NtSource::Ciram(off)) => {
+                    self.nametables[off as usize & 0xFFF] = value;
+                }
+                Some(NtSource::Mapper) => cart.as_mut().unwrap().nt_write(addr, value),
+                None => {}
+            }
+            return;
+        }
+        let mirroring = cart
+            .as_ref()
+            .map(|c| c.mirroring())
+            .unwrap_or(Mirroring::Horizontal);
+        let index = Self::map_nametable_index(addr, mirroring);
+        self.nametables[index] = value;
     }
 
     fn map_nametable_index(addr: u16, mirroring: Mirroring) -> usize {
@@ -412,9 +447,11 @@ impl Ppu {
     }
 
     /// CHR fetch that also tracks A12 rising edges for mapper IRQs (MMC3).
-    fn chr_fetch(&mut self, addr: u16, cart: &mut Option<Cartridge>) -> u8 {
+    fn chr_fetch(&mut self, addr: u16, cart: &mut Option<Cartridge>, sprite: bool) -> u8 {
         self.observe_ppu_a12(addr, cart);
-        cart.as_ref().map(|c| c.ppu_read(addr)).unwrap_or(0)
+        cart.as_ref()
+            .map(|c| c.ppu_read(addr, sprite))
+            .unwrap_or(0)
     }
 
     fn fetch_bg(&mut self, cart: &mut Option<Cartridge>) {
@@ -442,13 +479,13 @@ impl Ppu {
                 let fine_y = (self.v >> 12) & 0x7;
                 let table = if self.ctrl & 0x10 != 0 { 0x1000 } else { 0 };
                 let addr = table | ((self.bg_next_tile as u16) << 4) | fine_y;
-                self.bg_next_lo = self.chr_fetch(addr, cart);
+                self.bg_next_lo = self.chr_fetch(addr, cart, false);
             }
             7 => {
                 let fine_y = (self.v >> 12) & 0x7;
                 let table = if self.ctrl & 0x10 != 0 { 0x1000 } else { 0 };
                 let addr = table | ((self.bg_next_tile as u16) << 4) | fine_y | 8;
-                self.bg_next_hi = self.chr_fetch(addr, cart);
+                self.bg_next_hi = self.chr_fetch(addr, cart, false);
             }
             0 => {
                 // End of 8-dot window (cycles 8,16,…256 and 328,336).
@@ -578,7 +615,7 @@ impl Ppu {
             }
             5 => {
                 let (lo_addr, _) = self.sprite_pattern_addrs(&slot);
-                let mut lo = self.chr_fetch(lo_addr, cart);
+                let mut lo = self.chr_fetch(lo_addr, cart, true);
                 if slot.in_range && slot.attr & 0x40 != 0 {
                     lo = lo.reverse_bits();
                 }
@@ -586,7 +623,7 @@ impl Ppu {
             }
             7 => {
                 let (_, hi_addr) = self.sprite_pattern_addrs(&slot);
-                let mut hi = self.chr_fetch(hi_addr, cart);
+                let mut hi = self.chr_fetch(hi_addr, cart, true);
                 if slot.in_range && slot.attr & 0x40 != 0 {
                     hi = hi.reverse_bits();
                 }
@@ -721,6 +758,17 @@ impl Ppu {
         let vblank_sl = self.region.vblank_scanline();
         let prerender_sl = self.region.prerender_scanline();
         let last_visible = if self.region == Region::Pal { 238 } else { 239 };
+
+        // MMC5 scanline IRQ: clock once at the start of each visible line.
+        if self.cycle == 0 {
+            if let Some(c) = cart.as_mut() {
+                if self.rendering_enabled() && (0..=last_visible).contains(&self.scanline) {
+                    c.on_scanline(self.scanline);
+                } else if self.scanline == vblank_sl || !self.rendering_enabled() {
+                    c.on_scanline(-1);
+                }
+            }
+        }
 
         let rendering_line = (self.scanline >= 0 && self.scanline <= last_visible)
             || self.scanline == prerender_sl;

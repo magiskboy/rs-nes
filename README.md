@@ -9,15 +9,15 @@ Run NES games on a modern desktop through a small “NES OS” shell: boot splas
 ## Features
 
 ### NES OS
-- Boot splash → **Game Library** (scans `roms/` for `.nes` files)
+- Boot splash → **Game Library** (browse folders + `.nes` files under `roms/`)
 - Cover art panel on the right shows box art plus title, developer, and year; images live in each library folder’s `images/` (e.g. `roms/images/`)
 - Settings → **Scan library** looks up each ROM in the Libretro game database (official name, developer, year), downloads missing covers, and writes `gamelist.txt` next to the ROMs
 - Top bar shows date/time; video **Filter** applies to the OS shell as well as games
 - Shell input uses only NES buttons: **D-pad**, **A**, **B**, **Select**, **Start**
   - **Start** / **A** — confirm
   - **Select** — system menu (Settings / Quit)
-  - **B** — back
-- “Select folder…” sets the library to that folder only (replaces the previous one; default `roms/` is used until you pick one)
+  - **B** — up one folder (or cancel folder picker)
+- “Select folder…” opens an in-app folder browser; **Use this folder** sets the library root (replaces the previous one; default `roms/` until you pick one)
 - In-game: **Select** (or `P`) → pause (**Resume** / **Reset game** / **Screenshot** / **Exit to OS**)
 
 ### Play
@@ -38,6 +38,7 @@ Many well-known titles work thanks to common mappers, for example:
 - The Legend of Zelda, Metroid
 - Contra, Mega Man
 - Super Mario Bros. 3
+- Castlevania III (MMC5)
 - Battletoads
 - and other games that use the same mapper families
 

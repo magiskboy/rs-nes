@@ -6,6 +6,7 @@
 //! - [`uxrom`] — mapper 2 (Contra, Mega Man, …)
 //! - [`cnrom`] — mapper 3 (many early titles)
 //! - [`mmc3`] — mapper 4 (SMB3, Mega Man 3–6, …)
+//! - [`mmc5`] — mapper 5 (Castlevania III, …)
 //! - [`axrom`] — mapper 7 (Battletoads, …)
 //! - [`camerica`] — mapper 71 (Codemasters / Camerica)
 //!
@@ -19,6 +20,7 @@ mod camerica;
 mod cnrom;
 mod mmc1;
 mod mmc3;
+mod mmc5;
 mod nrom;
 mod uxrom;
 
@@ -29,12 +31,15 @@ use camerica::Camerica;
 use cnrom::Cnrom;
 use mmc1::Mmc1;
 use mmc3::Mmc3;
+use mmc5::Mmc5;
 use nrom::Nrom;
 use uxrom::Uxrom;
 
+pub use mmc5::NtSource;
+
 /// Whether this iNES mapper number can be emulated.
 pub fn mapper_supported(id: u8) -> bool {
-    matches!(id, 0 | 1 | 2 | 3 | 4 | 7 | 71)
+    matches!(id, 0 | 1 | 2 | 3 | 4 | 5 | 7 | 71)
 }
 
 /// Concrete mapper chips currently supported.
@@ -48,6 +53,8 @@ enum MapperImpl {
     Uxrom(Uxrom),
     Cnrom(Cnrom),
     Mmc3(Mmc3),
+    /// Boxed — ExRAM makes this board much larger than the others.
+    Mmc5(Box<Mmc5>),
     Axrom(Axrom),
     Camerica(Camerica),
 }
@@ -62,26 +69,53 @@ impl MapperImpl {
             2 => Ok(Self::Uxrom(Uxrom::new(prg_banks_16k))),
             3 => Ok(Self::Cnrom(Cnrom::new(chr_banks_8k))),
             4 => Ok(Self::Mmc3(Mmc3::new(prg_len, chr_len.max(0x2000)))),
+            5 => Ok(Self::Mmc5(Box::new(Mmc5::new(prg_len, chr_len.max(0x2000))))),
             7 => Ok(Self::Axrom(Axrom::new(prg_len))),
             71 => Ok(Self::Camerica(Camerica::new(prg_banks_16k))),
             id => Err(NesError::UnsupportedMapper(id)),
         }
     }
 
-    /// PRG-RAM size for this board (learning default: 8 KiB when used).
-    fn wants_prg_ram(mapper_id: u8, battery: bool) -> bool {
-        matches!(mapper_id, 1 | 4) || battery
+    /// PRG-RAM size for this board (0 = none).
+    fn prg_ram_size(mapper_id: u8, battery: bool) -> usize {
+        match mapper_id {
+            // MMC5 boards commonly need up to 64 KiB WRAM.
+            5 => 0x10000,
+            1 | 4 => 0x2000,
+            _ if battery => 0x2000,
+            _ => 0,
+        }
     }
 
-    fn cpu_read(&self, addr: u16, prg: &[u8], prg_ram: &[u8]) -> u8 {
+    fn cpu_read(&mut self, addr: u16, prg: &[u8], prg_ram: &[u8]) -> u8 {
         match self {
             Self::Nrom(m) => m.cpu_read(addr, prg, prg_ram),
             Self::Mmc1(m) => m.cpu_read(addr, prg, prg_ram),
             Self::Uxrom(m) => m.cpu_read(addr, prg, prg_ram),
             Self::Cnrom(m) => m.cpu_read(addr, prg, prg_ram),
             Self::Mmc3(m) => m.cpu_read(addr, prg, prg_ram),
+            Self::Mmc5(m) => m.cpu_read(addr, prg, prg_ram),
             Self::Axrom(m) => m.cpu_read(addr, prg, prg_ram),
             Self::Camerica(m) => m.cpu_read(addr, prg, prg_ram),
+        }
+    }
+
+    fn cpu_peek(&self, addr: u16, prg: &[u8], prg_ram: &[u8]) -> u8 {
+        match self {
+            Self::Mmc5(m) => m.cpu_peek(addr, prg, prg_ram),
+            other => {
+                // Other boards have no read side effects.
+                match other {
+                    Self::Nrom(m) => m.cpu_read(addr, prg, prg_ram),
+                    Self::Mmc1(m) => m.cpu_read(addr, prg, prg_ram),
+                    Self::Uxrom(m) => m.cpu_read(addr, prg, prg_ram),
+                    Self::Cnrom(m) => m.cpu_read(addr, prg, prg_ram),
+                    Self::Mmc3(m) => m.cpu_read(addr, prg, prg_ram),
+                    Self::Axrom(m) => m.cpu_read(addr, prg, prg_ram),
+                    Self::Camerica(m) => m.cpu_read(addr, prg, prg_ram),
+                    Self::Mmc5(_) => unreachable!(),
+                }
+            }
         }
     }
 
@@ -92,18 +126,20 @@ impl MapperImpl {
             Self::Uxrom(m) => m.cpu_write(addr, value, prg_ram),
             Self::Cnrom(m) => m.cpu_write(addr, value, prg_ram),
             Self::Mmc3(m) => m.cpu_write(addr, value, prg_ram),
+            Self::Mmc5(m) => m.cpu_write(addr, value, prg_ram),
             Self::Axrom(m) => m.cpu_write(addr, value, prg_ram),
             Self::Camerica(m) => m.cpu_write(addr, value, prg_ram),
         }
     }
 
-    fn chr_read(&self, addr: u16, chr: &[u8]) -> u8 {
+    fn chr_read(&self, addr: u16, chr: &[u8], sprite: bool) -> u8 {
         match self {
             Self::Nrom(m) => m.chr_read(addr, chr),
             Self::Mmc1(m) => m.chr_read(addr, chr),
             Self::Uxrom(m) => m.chr_read(addr, chr),
             Self::Cnrom(m) => m.chr_read(addr, chr),
             Self::Mmc3(m) => m.chr_read(addr, chr),
+            Self::Mmc5(m) => m.chr_read(addr, chr, sprite),
             Self::Axrom(m) => m.chr_read(addr, chr),
             Self::Camerica(m) => m.chr_read(addr, chr),
         }
@@ -116,6 +152,7 @@ impl MapperImpl {
             Self::Uxrom(m) => m.chr_write(addr, value, chr, chr_is_ram),
             Self::Cnrom(m) => m.chr_write(addr, value, chr, chr_is_ram),
             Self::Mmc3(m) => m.chr_write(addr, value, chr, chr_is_ram),
+            Self::Mmc5(m) => m.chr_write(addr, value, chr, chr_is_ram),
             Self::Axrom(m) => m.chr_write(addr, value, chr, chr_is_ram),
             Self::Camerica(m) => m.chr_write(addr, value, chr, chr_is_ram),
         }
@@ -125,15 +162,41 @@ impl MapperImpl {
         match self {
             Self::Mmc1(m) => m.mirroring(),
             Self::Mmc3(m) => m.mirroring(header == Mirroring::FourScreen),
+            Self::Mmc5(m) => m.mirroring(header),
             Self::Axrom(m) => m.mirroring(),
             Self::Camerica(m) => m.mirroring(header),
             Self::Nrom(_) | Self::Uxrom(_) | Self::Cnrom(_) => header,
         }
     }
 
+    fn uses_custom_nametable(&self) -> bool {
+        matches!(self, Self::Mmc5(_))
+    }
+
+    fn nametable_source(&mut self, addr: u16) -> Option<NtSource> {
+        match self {
+            Self::Mmc5(m) => Some(m.nametable_source(addr)),
+            _ => None,
+        }
+    }
+
+    fn nt_read(&self, addr: u16) -> u8 {
+        match self {
+            Self::Mmc5(m) => m.nt_read(addr),
+            _ => 0,
+        }
+    }
+
+    fn nt_write(&mut self, addr: u16, value: u8) {
+        if let Self::Mmc5(m) = self {
+            m.nt_write(addr, value);
+        }
+    }
+
     fn irq_pending(&self) -> bool {
         match self {
             Self::Mmc3(m) => m.irq_pending(),
+            Self::Mmc5(m) => m.irq_pending(),
             _ => false,
         }
     }
@@ -144,6 +207,18 @@ impl MapperImpl {
         }
     }
 
+    fn on_scanline(&mut self, scanline: i16) {
+        if let Self::Mmc5(m) = self {
+            m.on_scanline(scanline);
+        }
+    }
+
+    fn notify_ppu_reg(&mut self, reg: u16, value: u8) {
+        if let Self::Mmc5(m) = self {
+            m.notify_ppu_reg(reg, value);
+        }
+    }
+
     fn export_state(&self) -> Vec<u8> {
         match self {
             Self::Nrom(m) => m.export_state(),
@@ -151,6 +226,7 @@ impl MapperImpl {
             Self::Uxrom(m) => m.export_state(),
             Self::Cnrom(m) => m.export_state(),
             Self::Mmc3(m) => m.export_state(),
+            Self::Mmc5(m) => m.export_state(),
             Self::Axrom(m) => m.export_state(),
             Self::Camerica(m) => m.export_state(),
         }
@@ -163,6 +239,7 @@ impl MapperImpl {
             Self::Uxrom(m) => m.import_state(data),
             Self::Cnrom(m) => m.import_state(data),
             Self::Mmc3(m) => m.import_state(data),
+            Self::Mmc5(m) => m.import_state(data),
             Self::Axrom(m) => m.import_state(data),
             Self::Camerica(m) => m.import_state(data),
         }
@@ -205,8 +282,9 @@ impl Cartridge {
 
         let battery_backed = rom.header.battery_backed;
         let mapper = MapperImpl::from_id(mapper_id, rom.prg_rom.len(), chr_len)?;
-        let prg_ram = if MapperImpl::wants_prg_ram(mapper_id, battery_backed) {
-            vec![0; 0x2000]
+        let prg_ram_len = MapperImpl::prg_ram_size(mapper_id, battery_backed);
+        let prg_ram = if prg_ram_len > 0 {
+            vec![0; prg_ram_len]
         } else {
             Vec::new()
         };
@@ -301,9 +379,42 @@ impl Cartridge {
         self.mapper.on_ppu_a12_rise();
     }
 
-    /// CPU read from cartridge space (`$4020–$FFFF`).
-    pub fn cpu_read(&self, addr: u16) -> u8 {
+    /// MMC5 scanline IRQ clock (visible lines while rendering).
+    pub fn on_scanline(&mut self, scanline: i16) {
+        self.mapper.on_scanline(scanline);
+    }
+
+    /// Snoop PPUCTRL / PPUMASK for MMC5 (8×16 sprites + rendering).
+    pub fn notify_ppu_reg(&mut self, reg: u16, value: u8) {
+        self.mapper.notify_ppu_reg(reg, value);
+    }
+
+    /// True when nametable fetches must go through the mapper (MMC5).
+    pub fn uses_custom_nametable(&self) -> bool {
+        self.mapper.uses_custom_nametable()
+    }
+
+    /// Resolve a nametable address; `None` → use header mirroring + CIRAM.
+    pub fn nametable_source(&mut self, addr: u16) -> Option<NtSource> {
+        self.mapper.nametable_source(addr)
+    }
+
+    pub fn nt_read(&self, addr: u16) -> u8 {
+        self.mapper.nt_read(addr)
+    }
+
+    pub fn nt_write(&mut self, addr: u16, value: u8) {
+        self.mapper.nt_write(addr, value);
+    }
+
+    /// CPU read from cartridge space (`$4020–$FFFF`). May clear IRQ flags.
+    pub fn cpu_read(&mut self, addr: u16) -> u8 {
         self.mapper.cpu_read(addr, &self.prg_rom, &self.prg_ram)
+    }
+
+    /// Side-effect-free cart read (debug HUD / DMA peek).
+    pub fn cpu_peek(&self, addr: u16) -> u8 {
+        self.mapper.cpu_peek(addr, &self.prg_rom, &self.prg_ram)
     }
 
     /// CPU write (mapper registers / PRG-RAM). PRG-ROM itself stays read-only.
@@ -312,7 +423,7 @@ impl Cartridge {
         // at the written address (bus conflict). Jackal relies on this when leaving
         // bank 7 (identity table is `$AA` there — see nesdev Game_bugs).
         let value = if self.mapper_id == 2 && (0x8000..=0xFFFF).contains(&addr) {
-            let rom_byte = self.mapper.cpu_read(addr, &self.prg_rom, &self.prg_ram);
+            let rom_byte = self.mapper.cpu_peek(addr, &self.prg_rom, &self.prg_ram);
             value & rom_byte
         } else {
             value
@@ -321,9 +432,9 @@ impl Cartridge {
             .cpu_write(addr, value, &mut self.prg_ram);
     }
 
-    /// PPU pattern-table read (`$0000–$1FFF`).
-    pub fn ppu_read(&self, addr: u16) -> u8 {
-        self.mapper.chr_read(addr, &self.chr_mem)
+    /// PPU pattern-table read (`$0000–$1FFF`). `sprite` selects MMC5 CHR set.
+    pub fn ppu_read(&self, addr: u16, sprite: bool) -> u8 {
+        self.mapper.chr_read(addr, &self.chr_mem, sprite)
     }
 
     /// PPU pattern-table write (CHR-RAM only).
@@ -425,7 +536,7 @@ mod tests {
     fn nrom_16k_mirrors_prg() {
         let mut prg = vec![0; 0x4000];
         prg[0] = 0xEA;
-        let cart = Cartridge::nrom(prg, vec![]);
+        let mut cart = Cartridge::nrom(prg, vec![]);
         assert_eq!(cart.cpu_read(0x8000), 0xEA);
         assert_eq!(cart.cpu_read(0xC000), 0xEA);
     }
@@ -433,7 +544,7 @@ mod tests {
     #[test]
     fn nrom_from_smb_rom() {
         let rom = Loader::load("roms/super-mario-bros.nes").unwrap();
-        let cart = Cartridge::from_rom(rom).unwrap();
+        let mut cart = Cartridge::from_rom(rom).unwrap();
         assert_eq!(cart.mapper_id, 0);
         assert_eq!(cart.prg_rom().len(), 0x8000);
         assert_eq!(cart.chr_mem().len(), 0x2000);
@@ -448,7 +559,7 @@ mod tests {
     fn uxrom_from_contra_rom() {
         let rom = Loader::load("roms/contra.nes").unwrap();
         assert_eq!(rom.header.mapper, 2);
-        let cart = Cartridge::from_rom(rom).unwrap();
+        let mut cart = Cartridge::from_rom(rom).unwrap();
         assert_eq!(cart.mapper_id, 2);
         assert_eq!(cart.prg_rom().len(), 0x20000); // 128 KiB
         assert!(cart.chr_is_ram());
@@ -481,8 +592,16 @@ mod tests {
 
     #[test]
     fn unsupported_mapper_is_explicit() {
-        let err = MapperImpl::from_id(5, 0x8000, 0x2000).unwrap_err();
-        assert!(matches!(err, NesError::UnsupportedMapper(5)));
+        let err = MapperImpl::from_id(9, 0x8000, 0x2000).unwrap_err();
+        assert!(matches!(err, NesError::UnsupportedMapper(9)));
+    }
+
+    #[test]
+    fn mmc5_from_id() {
+        let m = MapperImpl::from_id(5, 0x20000, 0x2000).unwrap();
+        assert!(matches!(m, MapperImpl::Mmc5(_)));
+        assert!(mapper_supported(5));
+        assert_eq!(MapperImpl::prg_ram_size(5, false), 0x10000);
     }
 
     #[test]
@@ -490,7 +609,6 @@ mod tests {
         let m = MapperImpl::from_id(71, 0x20000, 0x2000).unwrap();
         assert!(matches!(m, MapperImpl::Camerica(_)));
         assert!(mapper_supported(71));
-        assert!(!mapper_supported(5));
     }
 
     #[test]
@@ -507,11 +625,11 @@ mod tests {
             chr_is_ram: true,
             mapper: MapperImpl::Camerica(Camerica::new(2)),
         };
-        assert_eq!(cart.cpu_read(0x8000), 0x11);
-        assert_eq!(cart.cpu_read(0xC000), 0x22);
+        assert_eq!(cart.cpu_peek(0x8000), 0x11);
+        assert_eq!(cart.cpu_peek(0xC000), 0x22);
         cart.cpu_write(0xC000, 1);
-        assert_eq!(cart.cpu_read(0x8000), 0x22);
-        assert_eq!(cart.cpu_read(0xC000), 0x22);
+        assert_eq!(cart.cpu_peek(0x8000), 0x22);
+        assert_eq!(cart.cpu_peek(0xC000), 0x22);
     }
 
     #[test]

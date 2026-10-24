@@ -4,6 +4,7 @@ use crate::emulator::menu::screen::{
     hint_for, layout_scale, row_step, screen_def, LabelCtx,
 };
 use crate::emulator::menu::Menu;
+use crate::emulator::os::browser::DirBrowser;
 use crate::emulator::os::cover::CoverRgba;
 use crate::emulator::os::library::{LibRow, RomEntry};
 use crate::emulator::os::theme;
@@ -68,6 +69,7 @@ pub fn draw_library(
     overlay: &mut Overlay,
     fb_w: i32,
     fb_h: i32,
+    browser: &DirBrowser,
     roms: &[RomEntry],
     rows: &[LibRow],
     sel: usize,
@@ -77,6 +79,9 @@ pub fn draw_library(
     cover: Option<&CoverRgba>,
     selected: Option<&RomEntry>,
     scan_hint: Option<&str>,
+    title: &str,
+    game_count: usize,
+    picking: bool,
 ) {
     clear_bg(overlay, fb_w, fb_h);
     let w = fb_w as f32;
@@ -89,15 +94,22 @@ pub fn draw_library(
     draw_topbar(overlay, w, status_h, scale, pad, clock);
 
     let title_y = status_h + pad * 0.6;
-    overlay.text(pad, title_y, scale * 1.2, theme::TITLE, "GAME LIBRARY");
-    let count = format!("{} games", roms.len());
-    let cw = Overlay::text_width(&count, scale * 0.85);
+    let heading = if picking { "SELECT FOLDER" } else { title };
+    let heading_disp = ellipsize(heading, 22);
+    overlay.text(pad, title_y, scale * 1.2, theme::TITLE, &heading_disp);
+    let count = if picking {
+        browser.cwd().map(|p| p.display().to_string()).unwrap_or_default()
+    } else {
+        format!("{game_count} games")
+    };
+    let count_disp = ellipsize(&count, 28);
+    let cw = Overlay::text_width(&count_disp, scale * 0.85);
     overlay.text(
         w - pad - cw,
         title_y + 2.0 * scale,
         scale * 0.85,
         theme::TEXT_DIM,
-        &count,
+        &count_disp,
     );
     let sep_y = title_y + title_h * 0.85;
     overlay.fill_rect(pad, sep_y, w - pad * 2.0, (1.0 * scale).max(1.0), theme::BORDER);
@@ -194,7 +206,11 @@ pub fn draw_library(
     let visible = ((list_bot - list_top) / line_h).floor().max(1.0) as usize;
 
     if rows.is_empty() {
-        let msg = "No ROMs found";
+        let msg = if picking {
+            "No folders"
+        } else {
+            "No ROMs found"
+        };
         let mw = Overlay::text_width(msg, scale);
         overlay.text(
             pad + (list_width - mw) * 0.5,
@@ -208,8 +224,9 @@ pub fn draw_library(
         for (vis_i, row_i) in (scroll..end).enumerate() {
             let y = list_top + vis_i as f32 * line_h;
             let selected = row_i == sel;
-            let label = rows[row_i].label(roms);
-            let is_action = matches!(rows[row_i], LibRow::SelectFolder);
+            let label = rows[row_i].label(browser, roms);
+            let is_action = rows[row_i].is_action();
+            let is_folder = rows[row_i].is_folder_row(browser);
 
             if selected {
                 overlay.fill_rect(
@@ -230,10 +247,10 @@ pub fn draw_library(
             } else {
                 "  "
             };
-            let unsupported = rows[row_i].unsupported(roms);
+            let unsupported = rows[row_i].unsupported(browser, roms);
             let color = if selected {
                 theme::SELECT_TEXT
-            } else if is_action {
+            } else if is_action || is_folder {
                 theme::ACCENT
             } else if unsupported {
                 theme::TEXT_DIM
@@ -274,7 +291,12 @@ pub fn draw_library(
     let fy = h - footer_h;
     overlay.fill_rect(0.0, fy, w, footer_h, theme::BG_PANEL);
     overlay.fill_rect(0.0, fy, w, (1.0 * scale).max(1.0), theme::BORDER_DIM);
-    let hint = scan_hint.unwrap_or("D-pad move  Start OK  Select menu");
+    let default_hint = if picking {
+        "D-pad move  A/Start OK  B back"
+    } else {
+        "D-pad move  Start OK  B up  Select menu"
+    };
+    let hint = scan_hint.unwrap_or(default_hint);
     let hs = scale * 0.7;
     let hw = Overlay::text_width(hint, hs);
     overlay.text(

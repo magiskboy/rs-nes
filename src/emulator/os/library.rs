@@ -1,6 +1,7 @@
 //! ROM library: scan folders, list rows, scroll.
 
 use crate::cart::{mapper_supported, Loader};
+use crate::emulator::os::browser::{BrowsePurpose, DirBrowser, FsEntry};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -44,7 +45,10 @@ impl RomEntry {
 
     /// Label for the library list: prefer official title.
     pub fn display_name(&self) -> &str {
-        self.title.as_deref().filter(|t| !t.is_empty()).unwrap_or(&self.name)
+        self.title
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .unwrap_or(&self.name)
     }
 
     /// List label; unsupported ROMs append `[mapper N]`.
@@ -62,36 +66,10 @@ impl RomEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibRow {
-    Rom(usize),
+    /// Index into [`DirBrowser::entries`].
+    Entry(usize),
     SelectFolder,
-}
-
-pub fn scan_rom_dir(dir: &Path) -> Vec<RomEntry> {
-    let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("nes"))
-            .unwrap_or(false);
-        if !ext {
-            continue;
-        }
-        out.push(RomEntry::from_path(path));
-    }
-    out.sort_by(|a, b| {
-        a.display_name()
-            .to_lowercase()
-            .cmp(&b.display_name().to_lowercase())
-    });
-    out
+    UseThisFolder,
 }
 
 pub fn default_rom_dirs() -> Vec<PathBuf> {
@@ -108,27 +86,132 @@ pub fn default_rom_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-impl LibRow {
-    pub fn label(self, roms: &[RomEntry]) -> String {
-        match self {
-            LibRow::Rom(i) => roms
-                .get(i)
-                .map(|r| r.list_label())
-                .unwrap_or_else(|| "?".into()),
-            LibRow::SelectFolder => "Select folder...".into(),
-        }
-    }
+/// All `.nes` files under `dir` (skips hidden dirs and `images/`).
+pub fn scan_roms_recursive(dir: &Path) -> Vec<RomEntry> {
+    let mut out = Vec::new();
+    scan_roms_recursive_into(dir, &mut out);
+    out.sort_by(|a, b| {
+        a.display_name()
+            .to_lowercase()
+            .cmp(&b.display_name().to_lowercase())
+    });
+    out
+}
 
-    pub fn unsupported(self, roms: &[RomEntry]) -> bool {
-        match self {
-            LibRow::Rom(i) => roms.get(i).is_some_and(|r| !r.supported),
-            LibRow::SelectFolder => false,
+fn scan_roms_recursive_into(dir: &Path, out: &mut Vec<RomEntry>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            if name.eq_ignore_ascii_case("images") {
+                continue;
+            }
+            scan_roms_recursive_into(&path, out);
+        } else if path.is_file() {
+            let nes = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("nes"));
+            if nes {
+                out.push(RomEntry::from_path(path));
+            }
         }
     }
 }
 
-pub fn build_rows(rom_count: usize) -> Vec<LibRow> {
-    let mut rows: Vec<LibRow> = (0..rom_count).map(LibRow::Rom).collect();
-    rows.push(LibRow::SelectFolder);
+/// Collect unique ROMs under every root (recursive) plus optional loose files.
+pub fn collect_roms(roots: &[PathBuf], extra_files: &[PathBuf]) -> Vec<RomEntry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut roms = Vec::new();
+    for dir in roots {
+        for entry in scan_roms_recursive(dir) {
+            let key = entry.path.to_string_lossy().to_lowercase();
+            if seen.insert(key) {
+                roms.push(entry);
+            }
+        }
+    }
+    for path in extra_files {
+        if !path.is_file() {
+            continue;
+        }
+        let key = path.to_string_lossy().to_lowercase();
+        if seen.insert(key) {
+            roms.push(RomEntry::from_path(path.clone()));
+        }
+    }
+    roms.sort_by(|a, b| {
+        a.display_name()
+            .to_lowercase()
+            .cmp(&b.display_name().to_lowercase())
+    });
+    roms
+}
+
+impl LibRow {
+    pub fn label(self, browser: &DirBrowser, roms: &[RomEntry]) -> String {
+        match self {
+            LibRow::Entry(i) => match browser.entries().get(i) {
+                Some(FsEntry::File { path, .. }) => roms
+                    .iter()
+                    .find(|r| r.path == *path)
+                    .map(|r| r.list_label())
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("?")
+                            .to_string()
+                    }),
+                Some(e) => e.label(),
+                None => "?".into(),
+            },
+            LibRow::SelectFolder => "Select folder...".into(),
+            LibRow::UseThisFolder => "Use this folder".into(),
+        }
+    }
+
+    pub fn unsupported(self, browser: &DirBrowser, roms: &[RomEntry]) -> bool {
+        match self {
+            LibRow::Entry(i) => match browser.entries().get(i) {
+                Some(FsEntry::File { path, .. }) => roms
+                    .iter()
+                    .find(|r| r.path == *path)
+                    .is_some_and(|r| !r.supported),
+                _ => false,
+            },
+            LibRow::SelectFolder | LibRow::UseThisFolder => false,
+        }
+    }
+
+    pub fn is_action(self) -> bool {
+        matches!(self, LibRow::SelectFolder | LibRow::UseThisFolder)
+    }
+
+    pub fn is_folder_row(self, browser: &DirBrowser) -> bool {
+        match self {
+            LibRow::Entry(i) => browser
+                .entries()
+                .get(i)
+                .is_some_and(|e| e.is_dir_like()),
+            _ => false,
+        }
+    }
+}
+
+/// Build list rows from the browser plus a trailing action for the current purpose.
+pub fn build_rows(browser: &DirBrowser) -> Vec<LibRow> {
+    let mut rows: Vec<LibRow> = (0..browser.entries().len())
+        .map(LibRow::Entry)
+        .collect();
+    match browser.purpose() {
+        BrowsePurpose::PlayRom => rows.push(LibRow::SelectFolder),
+        BrowsePurpose::PickFolder => rows.push(LibRow::UseThisFolder),
+    }
     rows
 }

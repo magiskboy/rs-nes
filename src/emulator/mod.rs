@@ -82,15 +82,6 @@ fn pick_rom_dialog() -> Option<PathBuf> {
     path
 }
 
-/// Native folder picker for adding a directory of `.nes` ROMs to the library.
-fn pick_folder_dialog() -> Option<PathBuf> {
-    let path = rfd::FileDialog::new()
-        .set_title("Select game folder")
-        .pick_folder();
-    macos_activate_for_input();
-    path
-}
-
 /// Ensure the process is a normal UI app and can receive keyboard events.
 ///
 /// On macOS, launching from Terminal (or opening an `rfd` dialog first) often
@@ -513,15 +504,6 @@ fn handle_os_action(
             *rom_path = None;
             window.set_title("Rust NES");
             os.return_to_library();
-        }
-        OsAction::PickFolder => {
-            if let Some(path) = pick_folder_dialog() {
-                os.set_folder(path);
-                os.save_config();
-                os.notify("Library folder updated");
-            }
-            macos_activate_for_input();
-            window.focus();
         }
         OsAction::ScanCovers => {
             os.start_cover_scan();

@@ -1,6 +1,7 @@
 //! NES OS shell — boot splash, game library, settings (OpenGL overlay UI).
 
 mod boot;
+mod browser;
 mod cover;
 mod draw;
 mod gamelist;
@@ -13,9 +14,10 @@ use crate::emulator::audio::UiSfx;
 use crate::emulator::config;
 use crate::emulator::menu::input::NavAction;
 use crate::emulator::menu::{Menu, UiAction};
+use crate::emulator::os::browser::{BrowseEvent, BrowsePurpose, DirBrowser, FsEntry};
 use crate::emulator::os::cover::{load_cover_rgba, CoverRgba, CoverService, ScanStatus};
 use crate::emulator::os::library::{
-    build_rows, default_rom_dirs, scan_rom_dir, LibRow, RomEntry,
+    build_rows, collect_roms, default_rom_dirs, LibRow, RomEntry,
 };
 use crate::emulator::os::notify::Notify;
 use crate::emulator::overlay::Overlay;
@@ -55,7 +57,9 @@ pub struct Os {
     boot_ticks: u32,
     /// Shared settings + in-game pause navigation.
     pub menu: Menu,
+    /// Flat ROM cache (recursive under library roots) for covers / metadata.
     roms: Vec<RomEntry>,
+    browser: DirBrowser,
     rows: Vec<LibRow>,
     sel: usize,
     scroll: usize,
@@ -95,7 +99,6 @@ pub enum OsAction {
     /// Save a BMP of the current NES frame.
     Screenshot,
     ExitToLibrary,
-    PickFolder,
     /// Kick off (or no-op) a background cover download job.
     ScanCovers,
     /// Write savestate slot 0..=2.
@@ -112,6 +115,7 @@ impl Os {
             boot_ticks: 0,
             menu: Menu::with_settings(loaded.settings),
             roms: Vec::new(),
+            browser: DirBrowser::new(),
             rows: Vec::new(),
             sel: 0,
             scroll: 0,
@@ -152,45 +156,36 @@ impl Os {
         self.menu.is_waiting_bind()
     }
 
-    pub fn refresh_library(&mut self) {
-        let mut seen = std::collections::HashSet::new();
-        let mut roms = Vec::new();
-        // Selected / CLI folders replace the default `roms/` locations.
+    fn library_roots(&self) -> Vec<PathBuf> {
         let dirs: Vec<PathBuf> = if self.extra_dirs.is_empty() {
             default_rom_dirs()
         } else {
             self.extra_dirs.clone()
         };
-        for dir in dirs {
-            for entry in scan_rom_dir(&dir) {
-                let key = entry.path.to_string_lossy().to_lowercase();
-                if seen.insert(key) {
-                    roms.push(entry);
-                }
-            }
-        }
-        for path in &self.extra_roms {
-            if !path.is_file() {
-                continue;
-            }
-            let key = path.to_string_lossy().to_lowercase();
-            if seen.insert(key) {
-                roms.push(RomEntry::from_path(path.clone()));
-            }
-        }
+        dirs.into_iter().filter(|p| p.is_dir()).collect()
+    }
+
+    /// Rebuild flat ROM cache + open PlayRom browser at library roots.
+    pub fn refresh_library(&mut self) {
+        let roots = self.library_roots();
+        let mut roms = collect_roms(&roots, &self.extra_roms);
         gamelist::apply_to_roms(&mut roms);
-        roms.sort_by(|a, b| {
-            a.display_name()
-                .to_lowercase()
-                .cmp(&b.display_name().to_lowercase())
-        });
         self.roms = roms;
-        self.rows = build_rows(self.roms.len());
+        self.browser.open_library(roots, &self.extra_roms);
+        self.sync_rows_from_browser();
+        self.reload_selected_cover();
+    }
+
+    /// Refresh listing after cwd change without rescanning the whole tree.
+    fn sync_rows_from_browser(&mut self) {
+        self.rows = build_rows(&self.browser);
         if self.sel >= self.rows.len() && !self.rows.is_empty() {
             self.sel = self.rows.len() - 1;
         }
+        if self.rows.is_empty() {
+            self.sel = 0;
+        }
         self.ensure_scroll_visible(self.lib_visible);
-        self.reload_selected_cover();
     }
 
     /// Add a folder of `.nes` files to the library (or a single ROM path from the CLI).
@@ -238,13 +233,44 @@ impl Os {
     }
 
     fn select_rom_path(&mut self, path: &Path) {
-        if let Some(i) = self.roms.iter().position(|r| r.path == path) {
-            if let Some(row_i) = self.rows.iter().position(|r| *r == LibRow::Rom(i)) {
-                self.sel = row_i;
-                self.ensure_scroll_visible(self.lib_visible);
-                self.reload_selected_cover();
-            }
+        self.browser.reveal_file(path, self.lib_visible);
+        self.sync_rows_from_browser();
+        if let Some(row_i) = self.rows.iter().position(|r| match r {
+            LibRow::Entry(i) => matches!(
+                self.browser.entries().get(*i),
+                Some(FsEntry::File { path: p, .. }) if p == path
+            ),
+            _ => false,
+        }) {
+            self.sel = row_i;
+            self.ensure_scroll_visible(self.lib_visible);
         }
+        self.reload_selected_cover();
+    }
+
+    fn open_folder_picker(&mut self) {
+        let start = self
+            .browser
+            .cwd()
+            .map(Path::to_path_buf)
+            .or_else(|| self.library_roots().into_iter().next())
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            });
+        self.browser.open_picker(start);
+        self.sel = 0;
+        self.scroll = 0;
+        self.sync_rows_from_browser();
+        self.reload_selected_cover();
+    }
+
+    fn cancel_folder_picker(&mut self) {
+        let roots = self.library_roots();
+        self.browser.open_library(roots, &self.extra_roms);
+        self.sel = 0;
+        self.scroll = 0;
+        self.sync_rows_from_browser();
+        self.reload_selected_cover();
     }
 
     pub fn enter_playing(&mut self) {
@@ -301,7 +327,6 @@ impl Os {
         self.prev_scan = status;
         if self.covers.generation != before {
             // Reload titles/devs/years written to gamelist.txt by the worker.
-            // Keep ROM order (and LibRow indices) stable while browsing.
             gamelist::apply_to_roms(&mut self.roms);
             self.reload_selected_cover();
         } else if self.covers.generation != self.cover_gen {
@@ -309,18 +334,27 @@ impl Os {
         }
     }
 
+    fn selected_rom_entry(&self) -> Option<&RomEntry> {
+        let LibRow::Entry(i) = self.rows.get(self.sel).copied()? else {
+            return None;
+        };
+        let FsEntry::File { path, .. } = self.browser.entries().get(i)? else {
+            return None;
+        };
+        self.roms.iter().find(|r| r.path == *path)
+    }
+
     fn reload_selected_cover(&mut self) {
         self.cover_gen = self.covers.generation;
-        let rom = self.rows.get(self.sel).and_then(|row| match row {
-            LibRow::Rom(i) => self.roms.get(*i),
-            LibRow::SelectFolder => None,
+        let cover = self.selected_rom_entry().and_then(|entry| {
+            let path = entry.path.clone();
+            let rgba = gamelist::resolve_cover_path(entry).and_then(|p| load_cover_rgba(&p));
+            Some((path, rgba))
         });
-        match rom {
-            Some(entry) => {
-                self.selected_cover_rom = Some(entry.path.clone());
-                self.selected_cover = gamelist::resolve_cover_path(entry).and_then(|p| {
-                    load_cover_rgba(&p)
-                });
+        match cover {
+            Some((path, rgba)) => {
+                self.selected_cover_rom = Some(path);
+                self.selected_cover = rgba;
             }
             None => {
                 self.selected_cover = None;
@@ -331,10 +365,7 @@ impl Os {
 
     /// Metadata for the currently selected library ROM, if any.
     pub fn selected_meta(&self) -> Option<&RomEntry> {
-        self.rows.get(self.sel).and_then(|row| match row {
-            LibRow::Rom(i) => self.roms.get(*i),
-            LibRow::SelectFolder => None,
-        })
+        self.selected_rom_entry()
     }
 
     pub fn start_cover_scan(&mut self) {
@@ -433,6 +464,9 @@ impl Os {
                 (OsAction::None, Some(UiSfx::Confirm))
             }
             Mode::Library => {
+                if self.browser.purpose() == BrowsePurpose::PickFolder {
+                    self.cancel_folder_picker();
+                }
                 self.sys_sel = 0;
                 self.mode = Mode::SystemMenu;
                 (OsAction::None, Some(UiSfx::Select))
@@ -507,15 +541,32 @@ impl Os {
                 (OsAction::None, Some(UiSfx::Move))
             }
             NavAction::Confirm => {
-                let action = self.activate_library_row();
-                let sfx = if action == OsAction::None {
-                    None
-                } else {
+                let (action, navigated) = self.activate_library_row();
+                let sfx = if action != OsAction::None || navigated {
                     Some(UiSfx::Confirm)
+                } else {
+                    None
                 };
                 (action, sfx)
             }
-            NavAction::Back | NavAction::Left | NavAction::Right => (OsAction::None, None),
+            NavAction::Back => {
+                let ev = self.browser.back();
+                match ev {
+                    BrowseEvent::GoParent => {
+                        self.sel = 0;
+                        self.scroll = 0;
+                        self.sync_rows_from_browser();
+                        self.reload_selected_cover();
+                        (OsAction::None, Some(UiSfx::Back))
+                    }
+                    BrowseEvent::Cancel => {
+                        self.cancel_folder_picker();
+                        (OsAction::None, Some(UiSfx::Back))
+                    }
+                    _ => (OsAction::None, None),
+                }
+            }
+            NavAction::Left | NavAction::Right => (OsAction::None, None),
         }
     }
 
@@ -545,26 +596,63 @@ impl Os {
         }
     }
 
-    fn activate_library_row(&mut self) -> OsAction {
+    /// Returns `(host action, navigated_in_browser)`.
+    fn activate_library_row(&mut self) -> (OsAction, bool) {
         match self.rows.get(self.sel).copied() {
-            Some(LibRow::Rom(i)) => {
-                if let Some(entry) = self.roms.get(i) {
-                    if !entry.supported {
-                        let msg = match entry.mapper_id {
-                            Some(id) => format!("Mapper {id} not supported"),
-                            None => "Invalid NES ROM".into(),
-                        };
-                        self.toast.push(msg);
-                        OsAction::None
-                    } else {
-                        OsAction::LoadRom(entry.path.clone())
+            Some(LibRow::Entry(i)) => {
+                self.browser.sel = i;
+                match self.browser.activate() {
+                    BrowseEvent::OpenFile(path) => {
+                        if let Some(entry) = self.roms.iter().find(|r| r.path == path) {
+                            if !entry.supported {
+                                let msg = match entry.mapper_id {
+                                    Some(id) => format!("Mapper {id} not supported"),
+                                    None => "Invalid NES ROM".into(),
+                                };
+                                self.toast.push(msg);
+                                (OsAction::None, false)
+                            } else {
+                                (OsAction::LoadRom(path), false)
+                            }
+                        } else {
+                            // Loose / just-added file not yet in cache.
+                            let entry = RomEntry::from_path(path.clone());
+                            if !entry.supported {
+                                let msg = match entry.mapper_id {
+                                    Some(id) => format!("Mapper {id} not supported"),
+                                    None => "Invalid NES ROM".into(),
+                                };
+                                self.toast.push(msg);
+                                (OsAction::None, false)
+                            } else {
+                                (OsAction::LoadRom(path), false)
+                            }
+                        }
                     }
-                } else {
-                    OsAction::None
+                    BrowseEvent::EnterDir(_) | BrowseEvent::GoParent => {
+                        self.sel = 0;
+                        self.scroll = 0;
+                        self.sync_rows_from_browser();
+                        self.reload_selected_cover();
+                        (OsAction::None, true)
+                    }
+                    _ => (OsAction::None, false),
                 }
             }
-            Some(LibRow::SelectFolder) => OsAction::PickFolder,
-            None => OsAction::None,
+            Some(LibRow::SelectFolder) => {
+                self.open_folder_picker();
+                (OsAction::None, true)
+            }
+            Some(LibRow::UseThisFolder) => match self.browser.choose_cwd() {
+                BrowseEvent::ChooseFolder(dir) => {
+                    self.set_folder(dir);
+                    self.save_config();
+                    self.notify("Library folder updated");
+                    (OsAction::None, true)
+                }
+                _ => (OsAction::None, false),
+            },
+            None => (OsAction::None, false),
         }
     }
 
@@ -656,6 +744,9 @@ impl Os {
         };
         let scan_hint_ref = scan_hint.as_deref();
         let selected = self.selected_meta();
+        let title = self.browser.title();
+        let game_count = self.roms.len();
+        let picking = self.browser.purpose() == BrowsePurpose::PickFolder;
         match self.mode {
             Mode::Boot => boot::draw(overlay, fb_w, fb_h, self.boot_ticks),
             Mode::Library => {
@@ -663,6 +754,7 @@ impl Os {
                     overlay,
                     fb_w,
                     fb_h,
+                    &self.browser,
                     &self.roms,
                     &self.rows,
                     self.sel,
@@ -672,6 +764,9 @@ impl Os {
                     self.selected_cover.as_ref(),
                     selected,
                     scan_hint_ref,
+                    &title,
+                    game_count,
+                    picking,
                 );
             }
             Mode::SystemMenu => {
@@ -679,6 +774,7 @@ impl Os {
                     overlay,
                     fb_w,
                     fb_h,
+                    &self.browser,
                     &self.roms,
                     &self.rows,
                     self.sel,
@@ -688,6 +784,9 @@ impl Os {
                     self.selected_cover.as_ref(),
                     selected,
                     scan_hint_ref,
+                    &title,
+                    game_count,
+                    picking,
                 );
                 let labels: Vec<&str> = SysItem::ALL.iter().map(|i| i.label()).collect();
                 draw::draw_system_menu(overlay, fb_w, fb_h, self.sys_sel, blink, &labels);

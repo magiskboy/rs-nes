@@ -154,7 +154,7 @@ impl Bus {
             0x4000..=0x4014 | 0x4018..=0x401F => 0,
             0x4020..=0xFFFF => self
                 .cart
-                .as_ref()
+                .as_mut()
                 .map(|c| c.cpu_read(addr))
                 .unwrap_or(0),
         }
@@ -167,7 +167,7 @@ impl Bus {
             0x4020..=0xFFFF => self
                 .cart
                 .as_ref()
-                .map(|c| c.cpu_read(addr))
+                .map(|c| c.cpu_peek(addr))
                 .unwrap_or(0),
             _ => 0,
         }
@@ -209,7 +209,7 @@ impl Bus {
             0x8000..=0xFFFF => self
                 .cart
                 .as_ref()
-                .map(|c| c.cpu_read(addr))
+                .map(|c| c.cpu_peek(addr))
                 .unwrap_or(0),
             _ => 0,
         }
@@ -321,7 +321,7 @@ mod tests {
         let pc = bus.insert_cartridge(cart);
         assert!(pc >= 0x8000);
         let via_bus = bus.read(pc);
-        let via_cart = bus.cartridge().unwrap().cpu_read(pc);
+        let via_cart = bus.cartridge().unwrap().cpu_peek(pc);
         assert_eq!(via_bus, via_cart);
     }
 
