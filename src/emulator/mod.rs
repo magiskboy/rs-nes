@@ -249,6 +249,12 @@ fn run_windowed(cli: Cli) {
     window.set_cursor_pos_polling(true);
     macos_activate_for_input();
     window.focus();
+    // Linux compositors (X11/Wayland) often make Sync(1) + a software limiter
+    // stack into ~48–50 FPS. Pace solely with the NES frame clock there.
+    // macOS/Windows: VSync alone is reliable; software wait mostly no-ops.
+    #[cfg(target_os = "linux")]
+    glfw.set_swap_interval(glfw::SwapInterval::Sync(0));
+    #[cfg(not(target_os = "linux"))]
     glfw.set_swap_interval(glfw::SwapInterval::Sync(1));
 
     // Auto-hide mouse: show on move, hide after idle.
@@ -756,18 +762,21 @@ fn frame_duration(region: Region) -> Duration {
     Duration::from_nanos(1_000_000_000u64.saturating_mul(den) / num)
 }
 
-/// Pace one host frame to the NES frame clock.
+/// Pace one host frame to the NES frame clock (~60.1 Hz NTSC / 50 Hz PAL).
 ///
-/// With VSync on, `swap_buffers` is the primary limiter; this path mostly
-/// no-ops. When ahead, sleep then spin the last millisecond — Linux timer
-/// slack makes a full `thread::sleep(rem)` overshoot and stutter. When behind,
-/// keep the phase (`+= period`) instead of snapping to wall time so a late
-/// frame does not force an extra sleep after the next VSync.
+/// Sleeps the coarse remainder then spins — Linux timer slack often overshoots
+/// a full `sleep(rem)` by several ms and lands at ~50 FPS. On overrun, keep
+/// phase (`+= period`) instead of snapping to wall time.
 fn wait_for_frame(next_frame: &mut Instant, frame_period: Duration) {
     let now = Instant::now();
     if now < *next_frame {
         let rem = *next_frame - now;
-        const SPIN: Duration = Duration::from_millis(1);
+        // Leave enough slack that a late wake still lands before the deadline.
+        // Linux timer slack is often 1–4 ms; a short spin window undershoots to ~50 FPS.
+        #[cfg(target_os = "linux")]
+        const SPIN: Duration = Duration::from_millis(4);
+        #[cfg(not(target_os = "linux"))]
+        const SPIN: Duration = Duration::from_millis(2);
         if rem > SPIN {
             thread::sleep(rem - SPIN);
         }
@@ -782,7 +791,9 @@ fn wait_for_frame(next_frame: &mut Instant, frame_period: Duration) {
         if behind > frame_period.saturating_mul(3) {
             *next_frame = now + frame_period;
         } else {
-            *next_frame += frame_period;
+            while *next_frame <= now {
+                *next_frame += frame_period;
+            }
         }
     }
 }
