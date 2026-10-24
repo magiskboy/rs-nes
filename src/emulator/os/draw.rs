@@ -108,11 +108,27 @@ pub fn draw_library(
     let list_right = cover_x - pad * 0.75;
     let list_width = (list_right - pad).max(80.0 * scale);
 
-    // Cover frame + metadata strip under the art.
+    // Cover frame sized to art + one meta line (no empty strip below).
     let cover_top = list_top;
-    let cover_h = (list_bot - cover_top).max(40.0);
-    let meta_h = (line_h * 3.2 + pad * 0.4).min(cover_h * 0.38);
-    let art_area_h = (cover_h - meta_h).max(24.0 * scale);
+    let max_cover_h = (list_bot - cover_top).max(40.0);
+    let inner_pad = 6.0 * scale;
+    let art_w = cover_w - inner_pad * 2.0;
+    let ms = scale * 0.72;
+    let meta_text_h = 8.0 * ms;
+    let sep_h = (1.0 * scale).max(1.0);
+    let meta_pad_y = 1.0 * scale;
+    let meta_h = sep_h + meta_pad_y + meta_text_h + meta_pad_y;
+
+    let art_h = if let Some(img) = cover {
+        let (_, _, _, fitted_h) = fit_rect(art_w, max_cover_h, img.width as f32, img.height as f32);
+        fitted_h
+    } else {
+        // Placeholder box when cover is missing.
+        (art_w * 1.4).min(max_cover_h * 0.85)
+    };
+    let art_area_h = (art_h + inner_pad * 1.5).min(max_cover_h - meta_h).max(24.0 * scale);
+    let cover_h = (art_area_h + meta_h).min(max_cover_h);
+
     let border = (2.0 * scale).max(2.0);
     overlay.fill_rect(
         cover_x - border,
@@ -123,83 +139,55 @@ pub fn draw_library(
     );
     overlay.fill_rect(cover_x, cover_top, cover_w, cover_h, theme::BG_PANEL);
 
-    let inner_pad = 6.0 * scale;
     let art_x = cover_x + inner_pad;
     let art_y = cover_top + inner_pad;
-    let art_w = cover_w - inner_pad * 2.0;
-    let art_h = art_area_h - inner_pad * 1.5;
+    let draw_art_h = art_area_h - inner_pad * 1.5;
 
     if let Some(img) = cover {
         overlay.set_cover_rgba(img.width, img.height, &img.pixels);
-        let (dx, dy, dw, dh) = fit_rect(art_w, art_h, img.width as f32, img.height as f32);
+        let (dx, dy, dw, dh) = fit_rect(art_w, draw_art_h, img.width as f32, img.height as f32);
         overlay.draw_cover(art_x + dx, art_y + dy, dw, dh);
     } else if selected.is_some() {
         let msg = "NO COVER";
-        let ms = scale * 0.85;
-        let mw = Overlay::text_width(msg, ms);
+        let ns = scale * 0.85;
+        let mw = Overlay::text_width(msg, ns);
         overlay.text(
             cover_x + (cover_w - mw) * 0.5,
-            art_y + art_h * 0.4,
-            ms,
+            art_y + draw_art_h * 0.4,
+            ns,
             theme::TEXT_DIM,
             msg,
         );
     }
 
-    // Title / developer / year under the cover.
-    let meta_y = cover_top + art_area_h + 2.0 * scale;
+    // Publisher - year under the cover (no title).
+    let sep_y = cover_top + art_area_h;
     overlay.fill_rect(
         cover_x + 2.0 * scale,
-        cover_top + art_area_h,
+        sep_y,
         cover_w - 4.0 * scale,
-        (1.0 * scale).max(1.0),
+        sep_h,
         theme::BORDER_DIM,
     );
-    let ms = scale * 0.72;
     let max_chars = ((cover_w - inner_pad * 2.0) / (8.0 * ms)).floor().max(6.0) as usize;
-    let (t, dev, year) = match selected {
-        Some(r) => {
-            let title = r.display_name();
-            let developer = r
-                .developer
-                .as_deref()
-                .filter(|s| !s.is_empty() && *s != "-")
-                .unwrap_or("—");
-            let year = r
-                .year
-                .as_deref()
-                .filter(|s| !s.is_empty() && *s != "-")
-                .unwrap_or("????");
-            (title, developer, year)
-        }
-        None => ("", "", ""),
-    };
-    if !t.is_empty() {
-        let title_disp = ellipsize(t, max_chars);
-        let tw = Overlay::text_width(&title_disp, ms);
+    if selected.is_some() {
+        let developer = selected
+            .and_then(|r| r.developer.as_deref())
+            .filter(|s| !s.is_empty() && *s != "-")
+            .unwrap_or("—");
+        let year = selected
+            .and_then(|r| r.year.as_deref())
+            .filter(|s| !s.is_empty() && *s != "-")
+            .unwrap_or("????");
+        let meta = format!("{developer} - {year}");
+        let meta_disp = ellipsize(&meta, max_chars);
+        let mw = Overlay::text_width(&meta_disp, ms);
         overlay.text(
-            cover_x + (cover_w - tw) * 0.5,
-            meta_y,
+            cover_x + (cover_w - mw) * 0.5,
+            sep_y + sep_h + meta_pad_y,
             ms,
-            theme::TITLE,
-            &title_disp,
-        );
-        let dev_disp = ellipsize(dev, max_chars);
-        let dw = Overlay::text_width(&dev_disp, ms * 0.95);
-        overlay.text(
-            cover_x + (cover_w - dw) * 0.5,
-            meta_y + line_h * 0.95,
-            ms * 0.95,
             theme::TEXT,
-            &dev_disp,
-        );
-        let yw = Overlay::text_width(year, ms * 0.95);
-        overlay.text(
-            cover_x + (cover_w - yw) * 0.5,
-            meta_y + line_h * 1.9,
-            ms * 0.95,
-            theme::TEXT_DIM,
-            year,
+            &meta_disp,
         );
     }
 
