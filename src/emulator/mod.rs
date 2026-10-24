@@ -451,14 +451,21 @@ fn handle_os_action(
                 frame_period,
             ) {
                 os.enter_playing();
+                os.notify("Game reset");
             }
         }
         OsAction::Screenshot => {
             if let Some(n) = nes.as_ref() {
                 let path = screenshot::default_path();
                 match screenshot::save_bmp(&path, n.framebuffer()) {
-                    Ok(()) => eprintln!("screenshot saved: {}", path.display()),
-                    Err(e) => eprintln!("screenshot failed: {e}"),
+                    Ok(()) => {
+                        eprintln!("screenshot saved: {}", path.display());
+                        os.notify("Screenshot saved");
+                    }
+                    Err(e) => {
+                        eprintln!("screenshot failed: {e}");
+                        os.notify(format!("Screenshot failed: {e}"));
+                    }
                 }
             }
         }
@@ -469,11 +476,11 @@ fn handle_os_action(
             match savestate::save(n, path, slot) {
                 Ok(p) => {
                     eprintln!("savestate slot {} → {}", slot + 1, p.display());
-                    os.set_library_hint(format!("Saved slot {}", slot + 1));
+                    os.notify(format!("Saved slot {}", slot + 1));
                 }
                 Err(e) => {
                     eprintln!("savestate save failed: {e}");
-                    os.set_library_hint(format!("Save failed: {e}"));
+                    os.notify(format!("Save failed: {e}"));
                 }
             }
         }
@@ -487,13 +494,13 @@ fn handle_os_action(
                         a.clear_queue();
                     }
                     eprintln!("savestate slot {} loaded", slot + 1);
-                    os.set_library_hint(format!("Loaded slot {}", slot + 1));
+                    os.notify(format!("Loaded slot {}", slot + 1));
                     // Close pause menu so gameplay resumes with the loaded state.
                     os.menu.close_all();
                 }
                 Err(e) => {
                     eprintln!("savestate load failed: {e}");
-                    os.set_library_hint(format!("Load failed: {e}"));
+                    os.notify(format!("Load failed: {e}"));
                 }
             }
         }
@@ -511,6 +518,7 @@ fn handle_os_action(
             if let Some(path) = pick_folder_dialog() {
                 os.set_folder(path);
                 os.save_config();
+                os.notify("Library folder updated");
             }
             macos_activate_for_input();
             window.focus();
@@ -544,7 +552,7 @@ fn load_rom_into(
         Ok(r) => r,
         Err(e) => {
             eprintln!("load ROM {}: {e:?}", path.display());
-            os.set_library_hint("Failed to load ROM");
+            os.notify("Failed to load ROM");
             return false;
         }
     };
@@ -552,12 +560,12 @@ fn load_rom_into(
         Ok(n) => n,
         Err(NesError::UnsupportedMapper(id)) => {
             eprintln!("build NES: unsupported mapper {id}");
-            os.set_library_hint(format!("Mapper {id} not supported"));
+            os.notify(format!("Mapper {id} not supported"));
             return false;
         }
         Err(e) => {
             eprintln!("build NES: {e:?}");
-            os.set_library_hint("Failed to start game");
+            os.notify("Failed to start game");
             return false;
         }
     };

@@ -6,16 +6,18 @@ mod draw;
 mod gamelist;
 mod library;
 mod nav;
+mod notify;
 mod theme;
 
 use crate::emulator::audio::UiSfx;
 use crate::emulator::config;
 use crate::emulator::menu::input::NavAction;
 use crate::emulator::menu::{Menu, UiAction};
-use crate::emulator::os::cover::{load_cover_rgba, CoverRgba, CoverService};
+use crate::emulator::os::cover::{load_cover_rgba, CoverRgba, CoverService, ScanStatus};
 use crate::emulator::os::library::{
     build_rows, default_rom_dirs, scan_rom_dir, LibRow, RomEntry,
 };
+use crate::emulator::os::notify::Notify;
 use crate::emulator::overlay::Overlay;
 use glfw::{Action, Glfw, Key};
 use std::path::{Path, PathBuf};
@@ -75,8 +77,10 @@ pub struct Os {
     selected_cover_rom: Option<PathBuf>,
     /// Last `CoverService::generation` applied to `selected_cover`.
     cover_gen: u64,
-    /// Temporary footer message (unsupported mapper, load error, …).
-    library_hint: Option<String>,
+    /// Bottom-of-screen toast (save/load, scan done, errors, …).
+    toast: Notify,
+    /// Previous cover-scan status — used to fire a toast when a scan finishes.
+    prev_scan: ScanStatus,
 }
 
 /// Result of handling input while in the shell or pause overlay.
@@ -121,7 +125,8 @@ impl Os {
             selected_cover: None,
             selected_cover_rom: None,
             cover_gen: 0,
-            library_hint: None,
+            toast: Notify::new(),
+            prev_scan: ScanStatus::Idle,
         };
         os.refresh_library();
         os.reload_selected_cover();
@@ -245,7 +250,6 @@ impl Os {
     pub fn enter_playing(&mut self) {
         self.mode = Mode::Playing;
         self.menu.close_all();
-        self.library_hint = None;
         // Treat all buttons as already held so a still-pressed Start/A
         // cannot immediately re-trigger UI on the next poll.
         self.prev_pad = u8::MAX;
@@ -280,13 +284,21 @@ impl Os {
 
     pub fn tick_blink(&mut self) {
         self.blink_ticks = self.blink_ticks.wrapping_add(1);
+        self.toast.tick();
     }
 
     /// Poll cover-scan worker and refresh settings label / selected cover.
     pub fn tick_covers(&mut self) {
         let before = self.covers.generation;
         self.covers.poll();
-        self.menu.scan_covers_label = self.covers.status().label();
+        let status = self.covers.status();
+        self.menu.scan_covers_label = status.label();
+        if matches!(status, ScanStatus::Finished { .. })
+            && !matches!(self.prev_scan, ScanStatus::Finished { .. })
+        {
+            self.toast.push(status.label());
+        }
+        self.prev_scan = status;
         if self.covers.generation != before {
             // Reload titles/devs/years written to gamelist.txt by the worker.
             // Keep ROM order (and LibRow indices) stable while browsing.
@@ -326,8 +338,19 @@ impl Os {
     }
 
     pub fn start_cover_scan(&mut self) {
-        let _ = self.covers.start_scan(&self.roms);
-        self.menu.scan_covers_label = self.covers.status().label();
+        if self.covers.start_scan(&self.roms) {
+            let status = self.covers.status();
+            self.menu.scan_covers_label = status.label();
+            self.prev_scan = status;
+            if matches!(status, ScanStatus::Finished { .. }) {
+                // Empty library finishes synchronously.
+                self.toast.push(status.label());
+            } else {
+                self.toast.push("Scanning library...");
+            }
+        } else {
+            self.toast.push("Scan already running");
+        }
     }
 
     fn blink_on(&self) -> bool {
@@ -531,27 +554,28 @@ impl Os {
                             Some(id) => format!("Mapper {id} not supported"),
                             None => "Invalid NES ROM".into(),
                         };
-                        self.library_hint = Some(msg);
+                        self.toast.push(msg);
                         OsAction::None
                     } else {
-                        self.library_hint = None;
                         OsAction::LoadRom(entry.path.clone())
                     }
                 } else {
                     OsAction::None
                 }
             }
-            Some(LibRow::SelectFolder) => {
-                self.library_hint = None;
-                OsAction::PickFolder
-            }
+            Some(LibRow::SelectFolder) => OsAction::PickFolder,
             None => OsAction::None,
         }
     }
 
-    /// Show a short footer message on the library (e.g. load failure from CLI).
+    /// Show a short bottom toast (save/load, errors, scan, …).
+    pub fn notify(&mut self, msg: impl Into<String>) {
+        self.toast.push(msg);
+    }
+
+    /// Backward-compatible alias for [`Self::notify`].
     pub fn set_library_hint(&mut self, msg: impl Into<String>) {
-        self.library_hint = Some(msg.into());
+        self.notify(msg);
     }
 
     fn open_settings(&mut self) {
@@ -625,10 +649,10 @@ impl Os {
         let blink = self.blink_on();
         let clock = draw::format_clock();
         let scan_hint = match self.covers.status() {
-            cover::ScanStatus::Running { done, total } => {
+            ScanStatus::Running { done, total } => {
                 Some(format!("Scanning library {done}/{total}..."))
             }
-            _ => self.library_hint.clone(),
+            _ => None,
         };
         let scan_hint_ref = scan_hint.as_deref();
         let selected = self.selected_meta();
@@ -677,5 +701,7 @@ impl Os {
                 }
             }
         }
+        // Always on top — visible in shell and during gameplay.
+        self.toast.draw(overlay, fb_w, fb_h);
     }
 }
