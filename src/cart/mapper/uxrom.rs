@@ -84,6 +84,17 @@ impl Uxrom {
             *slot = value;
         }
     }
+
+    pub fn export_state(&self) -> Vec<u8> {
+        (self.prg_bank as u16).to_le_bytes().to_vec()
+    }
+
+    pub fn import_state(&mut self, data: &[u8]) {
+        if data.len() >= 2 {
+            let bank = u16::from_le_bytes([data[0], data[1]]) as usize;
+            self.prg_bank = bank % self.bank_count;
+        }
+    }
 }
 
 #[cfg(test)]

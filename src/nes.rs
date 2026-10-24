@@ -120,6 +120,44 @@ impl Nes {
     pub fn set_audio_sample_rate(&mut self, hz: u32) {
         self.cpu.bus.apu.set_output_sample_rate(hz);
     }
+
+    pub fn cartridge(&self) -> Option<&Cartridge> {
+        self.cpu.bus.cartridge()
+    }
+
+    pub fn cartridge_mut(&mut self) -> Option<&mut Cartridge> {
+        self.cpu.bus.cartridge_mut()
+    }
+
+    /// Serialize console state (CPU + bus + cart regs) for a savestate blob body.
+    pub fn export_state(&self, out: &mut Vec<u8>) -> Result<(), String> {
+        out.extend_from_slice(&self.cpu.pc.to_le_bytes());
+        out.push(self.cpu.a);
+        out.push(self.cpu.x);
+        out.push(self.cpu.y);
+        out.push(self.cpu.sp);
+        out.push(self.cpu.p);
+        out.extend_from_slice(&self.cpu.cycles.to_le_bytes());
+        self.cpu.bus.export_state(out)
+    }
+
+    /// Restore console state from a savestate blob body.
+    pub fn import_state(&mut self, data: &mut &[u8]) -> Result<(), String> {
+        if data.len() < 2 + 5 + 8 {
+            return Err("cpu state truncated".into());
+        }
+        self.cpu.pc = u16::from_le_bytes([data[0], data[1]]);
+        *data = &data[2..];
+        self.cpu.a = data[0];
+        self.cpu.x = data[1];
+        self.cpu.y = data[2];
+        self.cpu.sp = data[3];
+        self.cpu.p = data[4];
+        *data = &data[5..];
+        self.cpu.cycles = u64::from_le_bytes(data[..8].try_into().unwrap());
+        *data = &data[8..];
+        self.cpu.bus.import_state(data)
+    }
 }
 
 #[cfg(test)]

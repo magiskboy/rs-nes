@@ -28,6 +28,14 @@ impl Ram {
     pub fn write(&mut self, addr: u16, value: u8) {
         self.data[Self::index(addr)] = value;
     }
+
+    pub fn as_slice(&self) -> &[u8; Self::SIZE] {
+        &self.data
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8; Self::SIZE] {
+        &mut self.data
+    }
 }
 
 impl Default for Ram {

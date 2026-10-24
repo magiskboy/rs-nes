@@ -169,6 +169,29 @@ impl Mmc1 {
             *slot = value;
         }
     }
+
+    pub fn export_state(&self) -> Vec<u8> {
+        vec![
+            self.shift,
+            self.shift_count,
+            self.control,
+            self.chr_bank0,
+            self.chr_bank1,
+            self.prg_bank,
+        ]
+    }
+
+    pub fn import_state(&mut self, data: &[u8]) {
+        if data.len() < 6 {
+            return;
+        }
+        self.shift = data[0];
+        self.shift_count = data[1].min(5);
+        self.control = data[2];
+        self.chr_bank0 = data[3];
+        self.chr_bank1 = data[4];
+        self.prg_bank = data[5];
+    }
 }
 
 #[cfg(test)]

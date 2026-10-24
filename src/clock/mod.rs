@@ -208,6 +208,16 @@ impl Clock {
         self.region.cpu_cycles_per_frame()
     }
 
+    pub fn ppu_frac(&self) -> u32 {
+        self.ppu_frac
+    }
+
+    pub fn set_counters(&mut self, cpu_cycles: u64, ppu_dots: u64, ppu_frac: u32) {
+        self.cpu_cycles = cpu_cycles;
+        self.ppu_dots = ppu_dots;
+        self.ppu_frac = ppu_frac;
+    }
+
     /// Record `n` CPU cycles and return the peripheral work for this step.
     pub fn advance(&mut self, n: u32) -> TickBudget {
         let (num, den) = self.region.ppu_dots_per_cpu();

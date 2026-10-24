@@ -106,6 +106,27 @@ impl Input {
             _ => 0,
         }
     }
+
+    pub fn export_state(&self, out: &mut Vec<u8>) {
+        out.push(u8::from(self.strobe));
+        for pad in &self.pads {
+            out.push(pad.buttons);
+            out.push(pad.shift);
+        }
+    }
+
+    pub fn import_state(&mut self, data: &mut &[u8]) -> Result<(), String> {
+        if data.len() < 5 {
+            return Err("input state truncated".into());
+        }
+        self.strobe = data[0] != 0;
+        self.pads[0].buttons = data[1];
+        self.pads[0].shift = data[2];
+        self.pads[1].buttons = data[3];
+        self.pads[1].shift = data[4];
+        *data = &data[5..];
+        Ok(())
+    }
 }
 
 #[cfg(test)]

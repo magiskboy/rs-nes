@@ -1,10 +1,12 @@
 pub mod audio;
+pub mod battery;
 pub mod cli;
 pub mod config;
 pub mod controller;
 pub mod menu;
 pub mod os;
 pub mod overlay;
+pub mod savestate;
 pub mod screenshot;
 pub mod theme;
 pub mod video;
@@ -18,6 +20,7 @@ use crate::emulator::menu::draw_debug;
 use crate::emulator::os::{Os, OsAction};
 use crate::emulator::overlay::Overlay;
 use crate::emulator::video::GlPresenter;
+use crate::error::NesError;
 use crate::nes::Nes;
 use glfw::{Action, Context, CursorMode, InitHint, Key, WindowEvent, WindowHint, WindowMode};
 use std::path::{Path, PathBuf};
@@ -211,16 +214,17 @@ fn run_windowed(cli: Cli) {
                             || mods.contains(glfw::Modifiers::Super)) =>
                 {
                     if let Some(path) = pick_rom_dialog() {
-                        load_rom_into(
+                        if load_rom_into(
                             &path,
                             &mut nes,
                             &mut rom_path,
                             &audio,
-                            &os,
+                            &mut os,
                             &mut window,
                             &mut frame_period,
-                        );
-                        os.enter_playing();
+                        ) {
+                            os.enter_playing();
+                        }
                     }
                     macos_activate_for_input();
                     window.focus();
@@ -384,6 +388,9 @@ fn run_windowed(cli: Cli) {
             next_frame = now + frame_period;
         }
     }
+
+    // Window closed via title-bar / Quit — persist battery before drop.
+    flush_battery(nes.as_ref(), rom_path.as_deref());
 }
 
 fn handle_os_action(
@@ -411,9 +418,13 @@ fn handle_os_action(
             );
             os.save_config();
         }
-        OsAction::Quit => window.set_should_close(true),
+        OsAction::Quit => {
+            flush_battery(nes.as_ref(), rom_path.as_deref());
+            window.set_should_close(true);
+        }
         OsAction::LoadRom(path) => {
-            load_rom_into(
+            flush_battery(nes.as_ref(), rom_path.as_deref());
+            if load_rom_into(
                 &path,
                 nes,
                 rom_path,
@@ -421,14 +432,16 @@ fn handle_os_action(
                 os,
                 window,
                 frame_period,
-            );
-            os.enter_playing();
+            ) {
+                os.enter_playing();
+            }
         }
         OsAction::ResetGame => {
             let Some(path) = rom_path.clone() else {
                 return;
             };
-            load_rom_into(
+            flush_battery(nes.as_ref(), Some(&path));
+            if load_rom_into(
                 &path,
                 nes,
                 rom_path,
@@ -436,8 +449,9 @@ fn handle_os_action(
                 os,
                 window,
                 frame_period,
-            );
-            os.enter_playing();
+            ) {
+                os.enter_playing();
+            }
         }
         OsAction::Screenshot => {
             if let Some(n) = nes.as_ref() {
@@ -448,7 +462,43 @@ fn handle_os_action(
                 }
             }
         }
+        OsAction::SaveState(slot) => {
+            let (Some(n), Some(path)) = (nes.as_ref(), rom_path.as_ref()) else {
+                return;
+            };
+            match savestate::save(n, path, slot) {
+                Ok(p) => {
+                    eprintln!("savestate slot {} → {}", slot + 1, p.display());
+                    os.set_library_hint(format!("Saved slot {}", slot + 1));
+                }
+                Err(e) => {
+                    eprintln!("savestate save failed: {e}");
+                    os.set_library_hint(format!("Save failed: {e}"));
+                }
+            }
+        }
+        OsAction::LoadState(slot) => {
+            let (Some(n), Some(path)) = (nes.as_mut(), rom_path.as_ref()) else {
+                return;
+            };
+            match savestate::load(n, path, slot) {
+                Ok(()) => {
+                    if let Some(a) = audio.as_ref() {
+                        a.clear_queue();
+                    }
+                    eprintln!("savestate slot {} loaded", slot + 1);
+                    os.set_library_hint(format!("Loaded slot {}", slot + 1));
+                    // Close pause menu so gameplay resumes with the loaded state.
+                    os.menu.close_all();
+                }
+                Err(e) => {
+                    eprintln!("savestate load failed: {e}");
+                    os.set_library_hint(format!("Load failed: {e}"));
+                }
+            }
+        }
         OsAction::ExitToLibrary => {
+            flush_battery(nes.as_ref(), rom_path.as_deref());
             if let Some(a) = audio.as_ref() {
                 a.clear_queue();
             }
@@ -471,29 +521,49 @@ fn handle_os_action(
     }
 }
 
+fn flush_battery(nes: Option<&Nes>, rom_path: Option<&Path>) {
+    let (Some(n), Some(path)) = (nes, rom_path) else {
+        return;
+    };
+    if let Some(cart) = n.cartridge() {
+        battery::save_from(cart, path);
+    }
+}
+
+/// Returns `true` when the ROM was loaded and `nes` updated.
 fn load_rom_into(
     path: &Path,
     nes: &mut Option<Nes>,
     rom_path: &mut Option<PathBuf>,
     audio: &Option<AudioOut>,
-    os: &Os,
+    os: &mut Os,
     window: &mut glfw::Window,
     frame_period: &mut Duration,
-) {
+) -> bool {
     let rom = match Loader::load(path.to_str().unwrap_or_default()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("load ROM {}: {e:?}", path.display());
-            return;
+            os.set_library_hint("Failed to load ROM");
+            return false;
         }
     };
     let mut n = match Nes::from_rom(rom) {
         Ok(n) => n,
+        Err(NesError::UnsupportedMapper(id)) => {
+            eprintln!("build NES: unsupported mapper {id}");
+            os.set_library_hint(format!("Mapper {id} not supported"));
+            return false;
+        }
         Err(e) => {
             eprintln!("build NES: {e:?}");
-            return;
+            os.set_library_hint("Failed to start game");
+            return false;
         }
     };
+    if let Some(cart) = n.cartridge_mut() {
+        battery::load_into(cart, path);
+    }
     if let Some(a) = audio.as_ref() {
         n.set_audio_sample_rate(a.sample_rate);
         a.set_volume(os.menu.settings.volume);
@@ -507,6 +577,7 @@ fn load_rom_into(
     window.set_title(&format!("Rust NES — {name}"));
     *rom_path = Some(path.to_path_buf());
     *nes = Some(n);
+    true
 }
 
 fn apply_cli_to_os(os: &mut Os, cli: &Cli) {

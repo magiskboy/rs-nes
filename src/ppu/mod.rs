@@ -842,6 +842,152 @@ impl Ppu {
         self.oam[self.oam_addr as usize] = value;
         self.oam_addr = self.oam_addr.wrapping_add(1);
     }
+
+    /// Binary snapshot of PPU regs + VRAM/OAM/palette + timing (for savestates).
+    pub fn export_state(&self, out: &mut Vec<u8>) {
+        out.push(self.ctrl);
+        out.push(self.mask);
+        out.push(self.status);
+        out.push(self.oam_addr);
+        out.extend_from_slice(&self.v.to_le_bytes());
+        out.extend_from_slice(&self.t.to_le_bytes());
+        out.push(self.fine_x);
+        out.push(u8::from(self.write_toggle));
+        out.push(self.data_buffer);
+        out.extend_from_slice(&self.oam);
+        out.extend_from_slice(&self.nametables);
+        out.extend_from_slice(&self.palette);
+        out.extend_from_slice(&self.bg_shift_lo.to_le_bytes());
+        out.extend_from_slice(&self.bg_shift_hi.to_le_bytes());
+        out.extend_from_slice(&self.bg_attr_shift_lo.to_le_bytes());
+        out.extend_from_slice(&self.bg_attr_shift_hi.to_le_bytes());
+        out.push(self.bg_next_tile);
+        out.push(self.bg_next_attr);
+        out.push(self.bg_next_lo);
+        out.push(self.bg_next_hi);
+        for s in &self.sprites {
+            write_sprite(out, s);
+        }
+        out.push(self.sprite_count);
+        for s in &self.next_sprites {
+            write_sprite(out, s);
+        }
+        out.push(self.next_sprite_count);
+        out.push(u8::from(self.sprite_zero_in_line));
+        // Skip framebuffer (rebuilt next frames); keep timing.
+        out.extend_from_slice(&self.cycle.to_le_bytes());
+        out.extend_from_slice(&self.scanline.to_le_bytes());
+        out.extend_from_slice(&self.frame.to_le_bytes());
+        out.push(u8::from(self.nmi_pending));
+        out.push(u8::from(self.odd_frame));
+        out.push(u8::from(self.last_chr_a12));
+        out.extend_from_slice(&self.a12_low_cycles.to_le_bytes());
+    }
+
+    pub fn import_state(&mut self, data: &mut &[u8]) -> Result<(), String> {
+        self.ctrl = take_u8(data)?;
+        self.mask = take_u8(data)?;
+        self.status = take_u8(data)?;
+        self.oam_addr = take_u8(data)?;
+        self.v = take_u16(data)?;
+        self.t = take_u16(data)?;
+        self.fine_x = take_u8(data)?;
+        self.write_toggle = take_u8(data)? != 0;
+        self.data_buffer = take_u8(data)?;
+        take_into(data, &mut self.oam)?;
+        take_into(data, &mut self.nametables)?;
+        take_into(data, &mut self.palette)?;
+        self.bg_shift_lo = take_u16(data)?;
+        self.bg_shift_hi = take_u16(data)?;
+        self.bg_attr_shift_lo = take_u16(data)?;
+        self.bg_attr_shift_hi = take_u16(data)?;
+        self.bg_next_tile = take_u8(data)?;
+        self.bg_next_attr = take_u8(data)?;
+        self.bg_next_lo = take_u8(data)?;
+        self.bg_next_hi = take_u8(data)?;
+        for s in &mut self.sprites {
+            *s = read_sprite(data)?;
+        }
+        self.sprite_count = take_u8(data)?;
+        for s in &mut self.next_sprites {
+            *s = read_sprite(data)?;
+        }
+        self.next_sprite_count = take_u8(data)?;
+        self.sprite_zero_in_line = take_u8(data)? != 0;
+        self.cycle = take_u16(data)?;
+        self.scanline = take_i16(data)?;
+        self.frame = take_u64(data)?;
+        self.nmi_pending = take_u8(data)? != 0;
+        self.odd_frame = take_u8(data)? != 0;
+        self.last_chr_a12 = take_u8(data)? != 0;
+        self.a12_low_cycles = take_u16(data)?;
+        Ok(())
+    }
+}
+
+fn write_sprite(out: &mut Vec<u8>, s: &SpriteSlot) {
+    out.push(s.x);
+    out.push(s.attr);
+    out.push(s.tile);
+    out.push(s.row);
+    out.push(s.pattern_lo);
+    out.push(s.pattern_hi);
+    out.push(u8::from(s.is_sprite0));
+    out.push(u8::from(s.in_range));
+}
+
+fn read_sprite(data: &mut &[u8]) -> Result<SpriteSlot, String> {
+    Ok(SpriteSlot {
+        x: take_u8(data)?,
+        attr: take_u8(data)?,
+        tile: take_u8(data)?,
+        row: take_u8(data)?,
+        pattern_lo: take_u8(data)?,
+        pattern_hi: take_u8(data)?,
+        is_sprite0: take_u8(data)? != 0,
+        in_range: take_u8(data)? != 0,
+    })
+}
+
+fn take_u8(data: &mut &[u8]) -> Result<u8, String> {
+    if data.is_empty() {
+        return Err("ppu state truncated".into());
+    }
+    let v = data[0];
+    *data = &data[1..];
+    Ok(v)
+}
+
+fn take_u16(data: &mut &[u8]) -> Result<u16, String> {
+    if data.len() < 2 {
+        return Err("ppu state truncated".into());
+    }
+    let v = u16::from_le_bytes([data[0], data[1]]);
+    *data = &data[2..];
+    Ok(v)
+}
+
+fn take_i16(data: &mut &[u8]) -> Result<i16, String> {
+    Ok(take_u16(data)? as i16)
+}
+
+fn take_u64(data: &mut &[u8]) -> Result<u64, String> {
+    if data.len() < 8 {
+        return Err("ppu state truncated".into());
+    }
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&data[..8]);
+    *data = &data[8..];
+    Ok(u64::from_le_bytes(b))
+}
+
+fn take_into(data: &mut &[u8], dst: &mut [u8]) -> Result<(), String> {
+    if data.len() < dst.len() {
+        return Err("ppu state truncated".into());
+    }
+    dst.copy_from_slice(&data[..dst.len()]);
+    *data = &data[dst.len()..];
+    Ok(())
 }
 
 impl Default for Ppu {

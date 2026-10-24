@@ -12,10 +12,12 @@ pub enum ScreenId {
     Settings,
     Controllers,
     ButtonMap,
+    SaveState,
+    LoadState,
 }
 
 impl ScreenId {
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = 6;
 
     pub fn index(self) -> usize {
         match self {
@@ -23,6 +25,8 @@ impl ScreenId {
             ScreenId::Settings => 1,
             ScreenId::Controllers => 2,
             ScreenId::ButtonMap => 3,
+            ScreenId::SaveState => 4,
+            ScreenId::LoadState => 5,
         }
     }
 }
@@ -48,6 +52,9 @@ pub enum ItemKind {
     MapDevice,
     Bind(NesPadButton),
     ResetMap,
+    /// Savestate slot 0..=2.
+    SaveSlot(u8),
+    LoadSlot(u8),
 }
 
 pub struct ScreenDef {
@@ -76,6 +83,8 @@ impl ItemKind {
             ItemKind::Goto(ScreenId::Controllers) => "Controllers".into(),
             ItemKind::Goto(ScreenId::ButtonMap) => "Button map".into(),
             ItemKind::Goto(ScreenId::Pause) => "Pause".into(),
+            ItemKind::Goto(ScreenId::SaveState) => "Save state".into(),
+            ItemKind::Goto(ScreenId::LoadState) => "Load state".into(),
             ItemKind::Back => "Back".into(),
             ItemKind::Volume => {
                 let pct = (ctx.settings.volume * 100.0).round() as i32;
@@ -124,6 +133,8 @@ impl ItemKind {
                 }
             }
             ItemKind::ResetMap => "Reset defaults".into(),
+            ItemKind::SaveSlot(n) => format!("Slot {}", n + 1),
+            ItemKind::LoadSlot(n) => format!("Slot {}", n + 1),
         }
     }
 
@@ -131,9 +142,25 @@ impl ItemKind {
 
 const PAUSE_ITEMS: &[ItemKind] = &[
     ItemKind::Resume,
+    ItemKind::Goto(ScreenId::SaveState),
+    ItemKind::Goto(ScreenId::LoadState),
     ItemKind::ResetGame,
     ItemKind::Screenshot,
     ItemKind::ExitToLibrary,
+];
+
+const SAVE_STATE_ITEMS: &[ItemKind] = &[
+    ItemKind::SaveSlot(0),
+    ItemKind::SaveSlot(1),
+    ItemKind::SaveSlot(2),
+    ItemKind::Back,
+];
+
+const LOAD_STATE_ITEMS: &[ItemKind] = &[
+    ItemKind::LoadSlot(0),
+    ItemKind::LoadSlot(1),
+    ItemKind::LoadSlot(2),
+    ItemKind::Back,
 ];
 
 const SETTINGS_ITEMS: &[ItemKind] = &[
@@ -185,6 +212,14 @@ pub fn screen_def(id: ScreenId) -> ScreenDef {
             title: "BUTTON MAP",
             items: BUTTON_MAP_ITEMS,
         },
+        ScreenId::SaveState => ScreenDef {
+            title: "SAVE STATE",
+            items: SAVE_STATE_ITEMS,
+        },
+        ScreenId::LoadState => ScreenDef {
+            title: "LOAD STATE",
+            items: LOAD_STATE_ITEMS,
+        },
     }
 }
 
@@ -200,6 +235,7 @@ pub fn hint_for(id: ScreenId, waiting_bind: bool, map_target: MapTarget) -> &'st
         ScreenId::Settings => "D-pad adjust  Start OK  B back",
         ScreenId::Controllers => "D-pad change  Start OK  B back",
         ScreenId::ButtonMap => "D-pad device  Start rebind  B back",
+        ScreenId::SaveState | ScreenId::LoadState => "D-pad  Start OK  B back",
     }
 }
 
@@ -207,7 +243,7 @@ pub fn hint_for(id: ScreenId, waiting_bind: bool, map_target: MapTarget) -> &'st
 pub fn layout_scale(id: ScreenId, fb_w: i32, fb_h: i32) -> (f32, f32) {
     // (scale, title_mul)
     match id {
-        ScreenId::Pause => {
+        ScreenId::Pause | ScreenId::SaveState | ScreenId::LoadState => {
             let scale = ((fb_w.min(fb_h) as f32) / 320.0).clamp(2.0, 4.0);
             (scale, 1.5)
         }

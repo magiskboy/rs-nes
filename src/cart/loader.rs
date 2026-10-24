@@ -59,6 +59,20 @@ impl Loader {
         Self::parse(&bytes)
     }
 
+    /// Read only the iNES mapper number (16-byte header). `None` if not a valid NES file.
+    pub fn peek_mapper(path: &std::path::Path) -> Option<u8> {
+        let mut file = File::open(path).ok()?;
+        let mut hdr = [0u8; 16];
+        use std::io::Read;
+        file.read_exact(&mut hdr).ok()?;
+        if &hdr[0..4] != b"NES\x1a" {
+            return None;
+        }
+        let mapper_lo = hdr[6] >> 4;
+        let mapper_hi = hdr[7] & 0xF0;
+        Some(mapper_hi | mapper_lo)
+    }
+
     /// Parse an in-memory iNES image (useful for tests).
     pub fn parse(bytes: &[u8]) -> Result<Rom, NesError> {
         if bytes.len() < 16 {

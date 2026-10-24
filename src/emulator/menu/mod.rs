@@ -35,6 +35,10 @@ pub enum UiAction {
     ExitToLibrary,
     /// Start a background cover-art scan for the ROM library.
     ScanCovers,
+    /// Write savestate slot 0..=2.
+    SaveState(u8),
+    /// Load savestate slot 0..=2.
+    LoadState(u8),
 }
 
 pub struct Menu {
@@ -299,6 +303,8 @@ impl Menu {
                 UiAction::ApplySettings
             }
             Kind::ScanCovers => UiAction::ScanCovers,
+            Kind::SaveSlot(n) => UiAction::SaveState(n),
+            Kind::LoadSlot(n) => UiAction::LoadState(n),
         }
     }
 

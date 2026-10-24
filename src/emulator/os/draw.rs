@@ -230,10 +230,13 @@ pub fn draw_library(
             } else {
                 "  "
             };
+            let unsupported = rows[row_i].unsupported(roms);
             let color = if selected {
                 theme::SELECT_TEXT
             } else if is_action {
                 theme::ACCENT
+            } else if unsupported {
+                theme::TEXT_DIM
             } else {
                 theme::TEXT
             };

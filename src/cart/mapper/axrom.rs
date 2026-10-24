@@ -73,6 +73,22 @@ impl Axrom {
             *slot = value;
         }
     }
+
+    pub fn export_state(&self) -> Vec<u8> {
+        let mut out = (self.prg_bank as u16).to_le_bytes().to_vec();
+        out.push(u8::from(self.upper_screen));
+        out
+    }
+
+    pub fn import_state(&mut self, data: &[u8]) {
+        if data.len() >= 2 {
+            let bank = u16::from_le_bytes([data[0], data[1]]) as usize;
+            self.prg_bank = bank % self.prg_banks_32k;
+        }
+        if data.len() >= 3 {
+            self.upper_screen = data[2] != 0;
+        }
+    }
 }
 
 #[cfg(test)]

@@ -220,6 +220,51 @@ impl Bus {
         let hi = self.read(addr.wrapping_add(1)) as u16;
         lo | (hi << 8)
     }
+
+    pub fn export_state(&self, out: &mut Vec<u8>) -> Result<(), String> {
+        out.extend_from_slice(self.ram.as_slice());
+        self.ppu.export_state(out);
+        self.input.export_state(out);
+        out.extend_from_slice(&self.clock.cpu_cycles.to_le_bytes());
+        out.extend_from_slice(&self.clock.ppu_dots.to_le_bytes());
+        out.extend_from_slice(&self.clock.ppu_frac().to_le_bytes());
+        out.extend_from_slice(&self.dma_cycles.to_le_bytes());
+        out.push(u8::from(self.cpu_odd_cycle));
+        out.extend_from_slice(&self.prepaid_cpu_cycles.to_le_bytes());
+        let cart = self.cart.as_ref().ok_or("no cartridge")?;
+        cart.export_state(out);
+        Ok(())
+    }
+
+    pub fn import_state(&mut self, data: &mut &[u8]) -> Result<(), String> {
+        if data.len() < Ram::SIZE {
+            return Err("bus state truncated".into());
+        }
+        self.ram.as_mut_slice().copy_from_slice(&data[..Ram::SIZE]);
+        *data = &data[Ram::SIZE..];
+        self.ppu.import_state(data)?;
+        self.input.import_state(data)?;
+        if data.len() < 8 + 8 + 4 + 4 + 1 + 4 {
+            return Err("bus state truncated".into());
+        }
+        let cpu_cycles = u64::from_le_bytes(data[..8].try_into().unwrap());
+        *data = &data[8..];
+        let ppu_dots = u64::from_le_bytes(data[..8].try_into().unwrap());
+        *data = &data[8..];
+        let ppu_frac = u32::from_le_bytes(data[..4].try_into().unwrap());
+        *data = &data[4..];
+        self.clock.set_counters(cpu_cycles, ppu_dots, ppu_frac);
+        self.dma_cycles = u32::from_le_bytes(data[..4].try_into().unwrap());
+        *data = &data[4..];
+        self.cpu_odd_cycle = data[0] != 0;
+        *data = &data[1..];
+        self.prepaid_cpu_cycles = u32::from_le_bytes(data[..4].try_into().unwrap());
+        *data = &data[4..];
+        let cart = self.cart.as_mut().ok_or("no cartridge")?;
+        cart.import_state(data)?;
+        self.apu.soft_reset_for_savestate();
+        Ok(())
+    }
 }
 
 impl Default for Bus {

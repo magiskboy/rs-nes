@@ -55,4 +55,10 @@ impl Nrom {
             *slot = value;
         }
     }
+
+    pub fn export_state(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    pub fn import_state(&mut self, _data: &[u8]) {}
 }

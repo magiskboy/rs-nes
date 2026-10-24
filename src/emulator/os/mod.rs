@@ -75,6 +75,8 @@ pub struct Os {
     selected_cover_rom: Option<PathBuf>,
     /// Last `CoverService::generation` applied to `selected_cover`.
     cover_gen: u64,
+    /// Temporary footer message (unsupported mapper, load error, …).
+    library_hint: Option<String>,
 }
 
 /// Result of handling input while in the shell or pause overlay.
@@ -92,6 +94,10 @@ pub enum OsAction {
     PickFolder,
     /// Kick off (or no-op) a background cover download job.
     ScanCovers,
+    /// Write savestate slot 0..=2.
+    SaveState(u8),
+    /// Load savestate slot 0..=2.
+    LoadState(u8),
 }
 
 impl Os {
@@ -115,6 +121,7 @@ impl Os {
             selected_cover: None,
             selected_cover_rom: None,
             cover_gen: 0,
+            library_hint: None,
         };
         os.refresh_library();
         os.reload_selected_cover();
@@ -238,6 +245,7 @@ impl Os {
     pub fn enter_playing(&mut self) {
         self.mode = Mode::Playing;
         self.menu.close_all();
+        self.library_hint = None;
         // Treat all buttons as already held so a still-pressed Start/A
         // cannot immediately re-trigger UI on the next poll.
         self.prev_pad = u8::MAX;
@@ -351,9 +359,11 @@ impl Os {
             UiAction::ApplySettings => OsAction::ApplySettings,
             UiAction::Quit => OsAction::Quit,
             UiAction::ScanCovers => OsAction::ScanCovers,
-            UiAction::ResetGame | UiAction::Screenshot | UiAction::ExitToLibrary => {
-                OsAction::None
-            }
+            UiAction::ResetGame
+            | UiAction::Screenshot
+            | UiAction::ExitToLibrary
+            | UiAction::SaveState(_)
+            | UiAction::LoadState(_) => OsAction::None,
         }
     }
 
@@ -445,6 +455,8 @@ impl Os {
                         UiAction::Screenshot => OsAction::Screenshot,
                         UiAction::ExitToLibrary => OsAction::ExitToLibrary,
                         UiAction::ScanCovers => OsAction::None,
+                        UiAction::SaveState(n) => OsAction::SaveState(n),
+                        UiAction::LoadState(n) => OsAction::LoadState(n),
                     };
                     (action, None)
                 } else {
@@ -514,14 +526,32 @@ impl Os {
         match self.rows.get(self.sel).copied() {
             Some(LibRow::Rom(i)) => {
                 if let Some(entry) = self.roms.get(i) {
-                    OsAction::LoadRom(entry.path.clone())
+                    if !entry.supported {
+                        let msg = match entry.mapper_id {
+                            Some(id) => format!("Mapper {id} not supported"),
+                            None => "Invalid NES ROM".into(),
+                        };
+                        self.library_hint = Some(msg);
+                        OsAction::None
+                    } else {
+                        self.library_hint = None;
+                        OsAction::LoadRom(entry.path.clone())
+                    }
                 } else {
                     OsAction::None
                 }
             }
-            Some(LibRow::SelectFolder) => OsAction::PickFolder,
+            Some(LibRow::SelectFolder) => {
+                self.library_hint = None;
+                OsAction::PickFolder
+            }
             None => OsAction::None,
         }
+    }
+
+    /// Show a short footer message on the library (e.g. load failure from CLI).
+    pub fn set_library_hint(&mut self, msg: impl Into<String>) {
+        self.library_hint = Some(msg.into());
     }
 
     fn open_settings(&mut self) {
@@ -556,7 +586,10 @@ impl Os {
             UiAction::None => OsAction::None,
             UiAction::ApplySettings => OsAction::ApplySettings,
             UiAction::Quit => OsAction::Quit,
-            UiAction::ResetGame | UiAction::Screenshot => OsAction::None,
+            UiAction::ResetGame
+            | UiAction::Screenshot
+            | UiAction::SaveState(_)
+            | UiAction::LoadState(_) => OsAction::None,
             UiAction::ScanCovers => OsAction::ScanCovers,
             UiAction::ExitToLibrary => {
                 self.menu.close_all();
@@ -595,7 +628,7 @@ impl Os {
             cover::ScanStatus::Running { done, total } => {
                 Some(format!("Scanning library {done}/{total}..."))
             }
-            _ => None,
+            _ => self.library_hint.clone(),
         };
         let scan_hint_ref = scan_hint.as_deref();
         let selected = self.selected_meta();

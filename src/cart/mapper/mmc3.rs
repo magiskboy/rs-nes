@@ -220,6 +220,35 @@ impl Mmc3 {
             *slot = value;
         }
     }
+
+    pub fn export_state(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(16);
+        out.push(self.bank_select);
+        out.extend_from_slice(&self.banks);
+        out.push(u8::from(self.mirroring_bit));
+        out.push(u8::from(self.prg_ram_enable));
+        out.push(self.irq_latch);
+        out.push(self.irq_counter);
+        out.push(u8::from(self.irq_reload));
+        out.push(u8::from(self.irq_enabled));
+        out.push(u8::from(self.irq_pending));
+        out
+    }
+
+    pub fn import_state(&mut self, data: &[u8]) {
+        if data.len() < 16 {
+            return;
+        }
+        self.bank_select = data[0];
+        self.banks.copy_from_slice(&data[1..9]);
+        self.mirroring_bit = data[9] != 0;
+        self.prg_ram_enable = data[10] != 0;
+        self.irq_latch = data[11];
+        self.irq_counter = data[12];
+        self.irq_reload = data[13] != 0;
+        self.irq_enabled = data[14] != 0;
+        self.irq_pending = data[15] != 0;
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 //! ROM library: scan folders, list rows, scroll.
 
+use crate::cart::{mapper_supported, Loader};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,6 +15,10 @@ pub struct RomEntry {
     pub year: Option<String>,
     /// Cover path relative to the ROM folder (`images/….png`).
     pub cover_rel: Option<String>,
+    /// iNES mapper number from the ROM header (`None` if unreadable).
+    pub mapper_id: Option<u8>,
+    /// Whether the core can run this mapper.
+    pub supported: bool,
 }
 
 impl RomEntry {
@@ -23,6 +28,8 @@ impl RomEntry {
             .and_then(|s| s.to_str())
             .unwrap_or("ROM")
             .to_string();
+        let mapper_id = Loader::peek_mapper(&path);
+        let supported = mapper_id.is_some_and(mapper_supported);
         Self {
             path,
             name,
@@ -30,12 +37,26 @@ impl RomEntry {
             developer: None,
             year: None,
             cover_rel: None,
+            mapper_id,
+            supported,
         }
     }
 
     /// Label for the library list: prefer official title.
     pub fn display_name(&self) -> &str {
         self.title.as_deref().filter(|t| !t.is_empty()).unwrap_or(&self.name)
+    }
+
+    /// List label; unsupported ROMs append `[mapper N]`.
+    pub fn list_label(&self) -> String {
+        let name = self.display_name();
+        if self.supported {
+            name.to_string()
+        } else if let Some(id) = self.mapper_id {
+            format!("{name}  [mapper {id}]")
+        } else {
+            format!("{name}  [bad ROM]")
+        }
     }
 }
 
@@ -92,9 +113,16 @@ impl LibRow {
         match self {
             LibRow::Rom(i) => roms
                 .get(i)
-                .map(|r| r.display_name().to_string())
+                .map(|r| r.list_label())
                 .unwrap_or_else(|| "?".into()),
             LibRow::SelectFolder => "Select folder...".into(),
+        }
+    }
+
+    pub fn unsupported(self, roms: &[RomEntry]) -> bool {
+        match self {
+            LibRow::Rom(i) => roms.get(i).is_some_and(|r| !r.supported),
+            LibRow::SelectFolder => false,
         }
     }
 }

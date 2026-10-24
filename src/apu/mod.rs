@@ -497,6 +497,14 @@ impl Apu {
         self.output_hz
     }
 
+    /// Clear channel + sample state after a savestate load (keeps region / host rate).
+    pub fn soft_reset_for_savestate(&mut self) {
+        let hz = self.output_hz;
+        let region = self.region;
+        *self = Self::with_region(region);
+        self.output_hz = hz;
+    }
+
     fn step_table(&self) -> &'static [u32] {
         match self.region {
             Region::Ntsc => {

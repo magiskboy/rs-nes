@@ -58,6 +58,17 @@ impl Cnrom {
     pub fn chr_write(&mut self, _addr: u16, _value: u8, _chr: &mut [u8], _chr_is_ram: bool) {
         // CNROM uses CHR-ROM.
     }
+
+    pub fn export_state(&self) -> Vec<u8> {
+        (self.chr_bank as u16).to_le_bytes().to_vec()
+    }
+
+    pub fn import_state(&mut self, data: &[u8]) {
+        if data.len() >= 2 {
+            let bank = u16::from_le_bytes([data[0], data[1]]) as usize;
+            self.chr_bank = bank % self.chr_banks;
+        }
+    }
 }
 
 #[cfg(test)]
