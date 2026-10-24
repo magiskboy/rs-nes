@@ -105,6 +105,110 @@ fn macos_activate_for_input() {
 #[cfg(not(target_os = "macos"))]
 fn macos_activate_for_input() {}
 
+/// Global mouse position in GLFW screen coordinates (origin = top-left of primary).
+///
+/// Used to open the window on the display the user is actually looking at, instead
+/// of always using the primary monitor.
+fn pointer_screen_pos() -> Option<(i32, i32)> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::{NSEvent, NSScreen};
+
+        let mouse = NSEvent::mouseLocation();
+        let mtm = MainThreadMarker::new()?;
+        let primary = NSScreen::screens(mtm).firstObject()?;
+        // Cocoa Y increases upward; GLFW Y increases downward from the primary top.
+        let primary_h = primary.frame().size.height;
+        Some((mouse.x as i32, (primary_h - mouse.y) as i32))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+        unsafe extern "system" {
+            fn GetCursorPos(lp_point: *mut Point) -> i32;
+        }
+        let mut p = Point { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut p) } != 0 {
+            Some((p.x, p.y))
+        } else {
+            None
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
+}
+
+fn point_in_rect(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32) -> bool {
+    px >= x && py >= y && px < x + w && py < y + h
+}
+
+fn overlap_area(ax: i32, ay: i32, aw: i32, ah: i32, bx: i32, by: i32, bw: i32, bh: i32) -> i64 {
+    let x0 = ax.max(bx);
+    let y0 = ay.max(by);
+    let x1 = (ax + aw).min(bx + bw);
+    let y1 = (ay + ah).min(by + bh);
+    let w = (x1 - x0).max(0) as i64;
+    let h = (y1 - y0).max(0) as i64;
+    w * h
+}
+
+/// Index of the monitor whose work area contains `(px, py)`, else largest overlap / 0.
+fn monitor_index_at(monitors: &[&mut glfw::Monitor], px: i32, py: i32) -> usize {
+    for (i, m) in monitors.iter().enumerate() {
+        let (x, y, w, h) = m.get_workarea();
+        if point_in_rect(px, py, x, y, w, h) {
+            return i;
+        }
+    }
+    0
+}
+
+/// Index of the monitor with the largest overlap with a window rectangle.
+fn monitor_index_for_rect(
+    monitors: &[&mut glfw::Monitor],
+    wx: i32,
+    wy: i32,
+    ww: i32,
+    wh: i32,
+) -> usize {
+    let mut best = 0;
+    let mut best_area = -1i64;
+    for (i, m) in monitors.iter().enumerate() {
+        let (x, y, w, h) = m.get_workarea();
+        let area = overlap_area(wx, wy, ww, wh, x, y, w, h);
+        if area > best_area {
+            best_area = area;
+            best = i;
+        }
+    }
+    best
+}
+
+/// Center the window on the monitor under the mouse (focused display).
+fn place_window_on_pointer_monitor(glfw: &mut glfw::Glfw, window: &mut glfw::Window) {
+    let Some((px, py)) = pointer_screen_pos() else {
+        return;
+    };
+    let (ww, wh) = window.get_size();
+    glfw.with_connected_monitors(|_, monitors| {
+        if monitors.is_empty() {
+            return;
+        }
+        let idx = monitor_index_at(monitors, px, py);
+        let (mx, my, mw, mh) = monitors[idx].get_workarea();
+        let x = mx + (mw - ww).max(0) / 2;
+        let y = my + (mh - wh).max(0) / 2;
+        window.set_pos(x, y);
+    });
+}
+
 fn run_headless(nes: &mut Nes) {
     const FRAMES: u64 = 60;
     nes.run_frames(FRAMES).expect("run frames");
@@ -135,6 +239,9 @@ fn run_windowed(cli: Cli) {
     let (mut window, events) = glfw
         .create_window(768, 720, "Rust NES", WindowMode::Windowed)
         .expect("create GLFW window");
+
+    // GLFW defaults to the primary display; move onto the focused (pointer) screen.
+    place_window_on_pointer_monitor(&mut glfw, &mut window);
 
     window.make_current();
     window.set_key_polling(true);
@@ -609,18 +716,24 @@ fn apply_settings(
     if want_fs && !is_fs {
         *windowed_pos = window.get_pos();
         *windowed_size = window.get_size();
-        glfw.with_primary_monitor(|_, monitor| {
-            if let Some(monitor) = monitor {
-                if let Some(mode) = monitor.get_video_mode() {
-                    window.set_monitor(
-                        WindowMode::FullScreen(monitor),
-                        0,
-                        0,
-                        mode.width,
-                        mode.height,
-                        Some(mode.refresh_rate),
-                    );
-                }
+        let (wx, wy) = *windowed_pos;
+        let (ww, wh) = *windowed_size;
+        // Fullscreen on the monitor that currently hosts the window, not primary.
+        glfw.with_connected_monitors(|_, monitors| {
+            if monitors.is_empty() {
+                return;
+            }
+            let idx = monitor_index_for_rect(monitors, wx, wy, ww, wh);
+            let monitor = &monitors[idx];
+            if let Some(mode) = monitor.get_video_mode() {
+                window.set_monitor(
+                    WindowMode::FullScreen(monitor),
+                    0,
+                    0,
+                    mode.width,
+                    mode.height,
+                    Some(mode.refresh_rate),
+                );
             }
         });
     } else if !want_fs && is_fs {
